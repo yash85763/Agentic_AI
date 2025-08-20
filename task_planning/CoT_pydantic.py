@@ -1,5 +1,5 @@
 from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 import json
 import asyncio
@@ -26,15 +26,13 @@ confidence: float = Field(…, ge=0.0, le=1.0, description=“Confidence level (
 dependencies: List[int] = Field(default=[], description=“Step numbers this step depends on”)
 
 ```
-@validator('dependencies')
-def validate_dependencies(cls, v, values):
+@model_validator(mode='after')
+def validate_dependencies(self):
     """Ensure dependencies reference earlier steps"""
-    if 'step_number' in values:
-        current_step = values['step_number']
-        for dep in v:
-            if dep >= current_step:
-                raise ValueError(f"Dependency {dep} must be earlier than current step {current_step}")
-    return v
+    for dep in self.dependencies:
+        if dep >= self.step_number:
+            raise ValueError(f"Dependency {dep} must be earlier than current step {self.step_number}")
+    return self
 ```
 
 class ChainOfThought(BaseModel):
@@ -48,7 +46,8 @@ timestamp: datetime = Field(default_factory=datetime.now, description=“When th
 metadata: Dict[str, Any] = Field(default_factory=dict, description=“Additional metadata”)
 
 ```
-@validator('reasoning_steps')
+@field_validator('reasoning_steps')
+@classmethod
 def validate_step_sequence(cls, v):
     """Ensure steps are properly numbered and sequential"""
     expected_step = 1
@@ -58,17 +57,17 @@ def validate_step_sequence(cls, v):
         expected_step += 1
     return v
 
-@validator('overall_confidence')
-def calculate_overall_confidence(cls, v, values):
+@model_validator(mode='after')
+def calculate_overall_confidence(self):
     """Calculate overall confidence based on individual step confidences"""
-    if 'reasoning_steps' in values and values['reasoning_steps']:
+    if self.reasoning_steps:
         # Use the minimum confidence as a conservative estimate
-        step_confidences = [step.confidence for step in values['reasoning_steps']]
+        step_confidences = [step.confidence for step in self.reasoning_steps]
         calculated_confidence = min(step_confidences)
         # Allow some tolerance for manually set confidence
-        if abs(v - calculated_confidence) > 0.2:
-            raise ValueError(f"Overall confidence {v} differs too much from calculated {calculated_confidence}")
-    return v
+        if abs(self.overall_confidence - calculated_confidence) > 0.2:
+            raise ValueError(f"Overall confidence {self.overall_confidence} differs too much from calculated {calculated_confidence}")
+    return self
 ```
 
 class LLMInterface(BaseModel):
@@ -80,7 +79,7 @@ base_url: Optional[str] = Field(default=None, description=“Base URL for API ca
 ```
 class Config:
     # Don't include sensitive fields in serialization
-    fields = {'api_key': {'write_only': True}}
+    json_schema_extra = {"properties": {"api_key": {"writeOnly": True}}}
 ```
 
 class ChainOfThoughtEngine:
