@@ -65,9 +65,11 @@ TOKEN_BUDGET = 8_000
 def controller(state: AgentState) -> AgentState:
     iters = state.get("iterations", 0)
     if iters >= MAX_ITERS:
-        return {**state, "stop": True, "messages": state["messages"] + [AIMessage("Stopping: max iterations reached.")]}
+        return {**state, "stop": True,
+                "messages": state["messages"] + [AIMessage("Stopping: max iterations reached.")]}
     if state.get("budget_tokens", TOKEN_BUDGET) <= 0:
-        return {**state, "stop": True, "messages": state["messages"] + [AIMessage("Stopping: token budget exhausted.")]}
+        return {**state, "stop": True,
+                "messages": state["messages"] + [AIMessage("Stopping: token budget exhausted.")]}
     return state  # continue
 ```
 
@@ -94,7 +96,8 @@ def autonomy_condition(state: AgentState):
 
 ```python
 plan_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a planning module. Produce a minimal step-by-step plan to solve the user goal. Include which tools to call if needed."),
+    ("system", "You are a planning module. Produce a minimal step-by-step plan to
+                solve the user goal. Include which tools to call if needed."),
     ("human", "{question}")
 ])
 
@@ -119,12 +122,14 @@ cot_prompt = ChatPromptTemplate.from_messages([
 ])
 
 reflect_prompt = ChatPromptTemplate.from_messages([
-    ("system", "First produce a concise answer, then reflect with 2-3 bullet critiques, then refine the answer."),
+    ("system", "First produce a concise answer, then reflect with 2-3 bullet critiques,
+    then refine the answer."),
     ("human", "{task}")
 ])
 
 tot_prompt = ChatPromptTemplate.from_messages([
-    ("system", "Propose 2-3 distinct solution branches (bulleted). For each, outline steps and a quick feasibility score (0-1). Conclude with the best branch and final answer."),
+    ("system", "Propose 2-3 distinct solution branches (bulleted). For each,
+    outline steps and a quick feasibility score (0-1). Conclude with the best branch and final answer."),
     ("human", "{task}")
 ])
 
@@ -147,7 +152,8 @@ from langgraph.prebuilt import tools_condition
 
 # The 'act' node encourages the LLM to call tools based on the plan
 act_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You can call tools if needed. If the plan requires external info or math, use the proper tool. Otherwise answer directly."),
+    ("system", "You can call tools if needed. If the plan requires external info or math,
+    use the proper tool. Otherwise answer directly."),
     ("human", "Plan:\n{plan}\n\nContinue.")
 ])
 
@@ -167,17 +173,20 @@ def act_node(state: AgentState) -> AgentState:
 
 ```python
 judge_prompt = ChatPromptTemplate.from_messages([
-    ("system", "Judge correctness, completeness, and safety. Output one of: FINISH, REPLAN, CONTINUE. Provide a 0-1 score."),
+    ("system", "Judge correctness, completeness, and safety.
+    Output one of: FINISH, REPLAN, CONTINUE. Provide a 0-1 score."),
     ("human", "Conversation so far:\n{history}\n\nYour decision:")
 ])
 
 def reflect_node(state: AgentState) -> AgentState:
-    history = "\n".join(m.content for m in state["messages"] if isinstance(m, (HumanMessage, AIMessage)))
+    history = "\n".join(m.content for m in state["messages"]
+    if isinstance(m, (HumanMessage, AIMessage)))
     resp = llm.invoke(judge_prompt.format_messages(history=history))
     text = resp.content.upper()
     score = 1.0 if "0.9" in text or "1.0" in text or "1" in text else 0.6  # toy scoring
     if "FINISH" in text:
-        return {**state, "result": history, "score": score, "messages": state["messages"] + [resp], "stop": True}
+        return {**state, "result": history, "score": score,
+    "messages": state["messages"] + [resp], "stop": True}
     if "REPLAN" in text:
         return {**state, "plan": None, "messages": state["messages"] + [resp]}
     return {**state, "messages": state["messages"] + [resp]}  # CONTINUE
