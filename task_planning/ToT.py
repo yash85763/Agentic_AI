@@ -1,251 +1,332 @@
-# --- imports
-from __future__ import annotations
-from typing import List, Literal, Union, NamedTuple, Optional, Dict, Any
-import operator, json
-from typing_extensions import Annotated, TypedDict
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Single-file Tree-of-Thoughts (ToT) for TEXT tasks (Creative Writing),
+adapted from the official paper/repo configuration:
+  - Thought generation strategy: 'sample' (i.i.d. candidates)
+  - State evaluation strategy:   'vote'  (LLM chooses best among candidates)
+  - Search strategy:             BFS with pruning (keep top-b = n_select_sample)
+
+References:
+- Paper: Tree of Thoughts: Deliberate Problem Solving with Large Language Models (Yao et al., 2023)
+- Official repo quick-start and flags layout (naive_run, prompt_sample, method_generate, method_evaluate, n_* knobs)
+
+This script intentionally limits itself to the TEXT example.
+"""
+
+import os
+import argparse
+import json
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple
 from pydantic import BaseModel, Field
+from openai import OpenAI
 
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph
-from langgraph.runtime import Runtime
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Send
-
-# ====== Generic ToT scaffolding ======
-
-# Utility reducer to append to a list in graph state
-def _append_list(existing: Optional[list] = None,
-                 updates: Optional[Union[list, Literal["clear"]]] = None) -> list:
-    if existing is None: existing = []
-    if updates is None:  return existing
-    if updates == "clear": return []
-    return existing + updates
-
-# A "candidate" is the unit we expand/score/prune.
-class Candidate(NamedTuple):
-    text: str                  # task-specific content (equation, outline step, etc.)
-    score: Optional[float] = None
-    feedback: Optional[str] = None
-
-class ScoredCandidate(Candidate):
-    score: float
-    feedback: str
-
-# Graph state & context
-class ToTState(TypedDict):
-    problem: str
-    candidates: Annotated[List[Candidate], _append_list]
-    scored: Annotated[List[ScoredCandidate], _append_list]
-    depth: Annotated[int, operator.add]
-
-class Context(TypedDict, total=False):
-    max_depth: int
-    threshold: float
-    k: int            # number of children proposed per node
-    beam_size: int    # width b
-
-class EnsuredContext(TypedDict):
-    max_depth: int; threshold: float; k: int; beam_size: int
-
-def _ctx(runtime: Runtime[Context]) -> EnsuredContext:
-    c = runtime.context or {}
-    return {
-        "max_depth": c.get("max_depth", 8),
-        "threshold": c.get("threshold", 0.95),
-        "k": c.get("k", 5),
-        "beam_size": c.get("beam_size", 3),
-    }
-
-# ====== Task interfaces ======
-
-class ToTTask:
-    """Implement these two hooks per task."""
-    def build_solver(self, llm: ChatOpenAI, k: int):
-        """Return a LangChain Runnable that maps {problem, seed?, k} -> {"candidates": [Candidate,...]}"""
-        raise NotImplementedError
-
-    def score(self, problem: str, cand: Candidate) -> ScoredCandidate:
-        """Return ScoredCandidate with numeric score in [0,1] and textual feedback."""
-        raise NotImplementedError
-
-# ====== Task A: Game of 24 ======
-# Following the paper setup: propose candidate equations; score by correctness & closeness.  [oai_citation:4‡LangChain](https://langchain-ai.github.io/langgraph/tutorials/tot/tot/) [oai_citation:5‡GitHub](https://github.com/princeton-nlp/tree-of-thought-llm)
-
-OperatorType = Literal["+", "-", "*", "/"]
-TokenType = Union[float, OperatorType]
-
-class Equation(BaseModel):
-    """Reverse-Polish notation (RPN) tokens; easier to validate & evaluate."""
-    tokens: List[TokenType] = Field(
-        description="RPN tokens, e.g., [3, 4, '+', 2, '*'] -> (3+4)*2"
+# -----------------------------
+# OpenAI helper
+# -----------------------------
+def chat_complete(
+    client: OpenAI,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float = 0.7,
+) -> str:
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
     )
-    def compute(self) -> float:
-        ops = {"+": operator.add, "-": operator.sub, "*": operator.mul, "/": operator.truediv}
-        stack = []
-        for t in self.tokens:
-            if isinstance(t, float) or isinstance(t, int):
-                stack.append(float(t))
-            else:
-                b, a = stack.pop(), stack.pop()
-                stack.append(ops[t](a, b))
-        return stack[0]
+    return resp.choices[0].message.content.strip()
 
-class GuessBatch(BaseModel):
-    reasoning: str
-    equations: List[Equation]
 
-class Game24Task(ToTTask):
-    def build_solver(self, llm: ChatOpenAI, k: int):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "You are playing the Game of 24. Using the four numbers, propose exactly {k} candidate equations "
-             "that evaluate to 24, expressed as reverse-polish notation tokens. "
-             "Use each input number exactly once; you may use + - * /."),
-            ("user",
-             "Numbers: {problem}\n"
-             "{seed}\n"
-             "Return strictly in the requested structured schema.")
-        ]).partial()
+# -----------------------------
+# Prompt templates (text task)
+# -----------------------------
+#
+# In the paper/repo, the TEXT task uses:
+#   - "sample" generator: generate k distinct continuations/passages in parallel
+#   - "vote" evaluator: compare k candidates and pick the best one
+#
+# The vote/evaluator prompt follows the shape:
+#   "Given an instruction and several choices, analyze each, then conclude:
+#    'The best choice is s' (s is an integer id)."
+#
+# (See repo readme & public references describing ToT prompts for TEXT)  [citations in the chat]
+#
 
-        # Ask the model for structured output -> GuessBatch Pydantic
-        bound = llm.with_structured_output(GuessBatch)
+SYSTEM_SAMPLE = (
+    "You are a helpful writing model. "
+    "Given a creative-writing instruction, produce DISTINCT candidate continuations. "
+    "Be concise and follow instructions exactly."
+)
 
-        def _solver(inputs: Dict[str, Any]) -> Dict[str, List[Candidate]]:
-            seed = f"Earlier candidate: {inputs['seed']}" if inputs.get("seed") else ""
-            out: GuessBatch = (prompt | bound).invoke({"problem": inputs["problem"], "seed": seed, "k": k})
-            cands = [Candidate(text=eq.model_dump_json()) for eq in out.equations]
-            return {"candidates": cands}
+# Standard sampling (IO) for TEXT: produce multiple i.i.d ideas
+SAMPLE_USER_TEMPLATE = """Instruction:
+{instruction}
 
-        return _solver
+Produce {k} DISTINCT short passages (2-4 sentences each) that continue or fulfill the instruction.
+Return them as a numbered list 1..{k}. Keep each passage compact.
+"""
 
-    def score(self, problem: str, cand: Candidate) -> ScoredCandidate:
-        # Validate uses exactly the given four numbers once, and score closeness to 24.
-        numbers = sorted(list(map(int, problem.split())))
-        try:
-            eq = Equation.model_validate_json(cand.text)
-            used_nums = sorted([int(x) for x in eq.tokens if isinstance(x, (int, float))])
-            if used_nums != numbers:
-                return ScoredCandidate(text=cand.text, score=0.0,
-                                       feedback="Must use all four numbers exactly once.")
-            val = eq.compute()
-            # Reward 1.0 if exact; otherwise 1/(1+|24-val|).
-            score = 1.0 if abs(val - 24) < 1e-6 else 1.0 / (1.0 + abs(24 - val))
-            return ScoredCandidate(text=cand.text, score=score, feedback=f"Evaluates to {val}")
-        except Exception as e:
-            return ScoredCandidate(text=cand.text, score=0.0, feedback=f"Invalid equation: {e}")
+# CoT sampling (optional baseline): ask model to think then answer once
+SYSTEM_COT = (
+    "You are a helpful reasoning model. Think step by step (briefly) then produce a single final passage."
+)
+COT_USER_TEMPLATE = """Instruction:
+{instruction}
 
-# ====== Task B: Creative Writing (LLM value function) ======
-# Mirrors the paper's "vote/value" style: propose diverse plot openings; LLM scores for criteria.  [oai_citation:6‡GitHub](https://github.com/princeton-nlp/tree-of-thought-llm)
+First, think briefly about the best direction (hidden thoughts). Then write ONE compact passage (3-5 sentences).
+Return ONLY the final passage (no analysis)."""
 
-class WritingTask(ToTTask):
-    def __init__(self, rubric: str = "coherence, novelty, and emotional hook"):
-        self.rubric = rubric
+# Vote evaluator: compare multiple choices and pick the single best index
+SYSTEM_VOTE = (
+    "You are a careful writing judge. Given an instruction and several candidate passages, "
+    "analyze each for coherence, creativity, clarity, and how well it fulfills the instruction. "
+    "Then CHOOSE the single best candidate."
+)
+VOTE_USER_TEMPLATE = """Instruction:
+{instruction}
 
-    def build_solver(self, llm: ChatOpenAI, k: int):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "You are a fiction writing assistant. Propose {k} distinct short openings (2-3 sentences each) "
-             "that continue the user's premise. Output JSON list only."),
-            ("user", "Premise: {problem}\nPrevious attempt (optional): {seed}")
-        ])
-        def _solver(inputs: Dict[str, Any]) -> Dict[str, List[Candidate]]:
-            seed = inputs.get("seed") or ""
-            text = (prompt | llm).invoke({"problem": inputs["problem"], "seed": seed, "k": k}).content
-            # Try to parse a JSON list of strings; if not, split lines.
-            try:
-                proposals = json.loads(text)
-                if isinstance(proposals, dict) and "openings" in proposals:
-                    proposals = proposals["openings"]
-            except Exception:
-                proposals = [s.strip("-• ") for s in text.split("\n") if s.strip()][:k]
-            cands = [Candidate(text=p) for p in proposals[:k]]
-            return {"candidates": cands}
-        return _solver
+Choices:
+{choices_str}
 
-    def score(self, problem: str, cand: Candidate) -> ScoredCandidate:
-        # LLM-as-a-judge: 0..1 score with brief feedback
-        judge = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        jprompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "Score the candidate on a 0..1 scale for the user's premise based on {rubric}. "
-             "Return ONLY compact JSON: {\"score\": <float>, \"feedback\": \"...\"}"),
-            ("user", "Premise: {premise}\nCandidate:\n{cand}")
-        ]).partial(rubric=self.rubric)
-        raw = (jprompt | judge).invoke({"premise": problem, "cand": cand.text}).content
-        try:
-            obj = json.loads(raw)
-            score = float(obj.get("score", 0))
-            fb = obj.get("feedback", "")
-        except Exception:
-            score, fb = 0.0, f"Judge parsing failed; raw={raw[:120]}"
-        return ScoredCandidate(text=cand.text, score=score, feedback=fb)
+Analyze each choice briefly. On the LAST line, write exactly:
+The best choice is {s}
+(where s is the integer id)."""
 
-# ====== Build the ToT graph (task-agnostic) ======
 
-def build_tot_graph(task: ToTTask, model: str = "gpt-4o-mini"):
-    llm = ChatOpenAI(model=model, temperature=0.7)
-    builder = StateGraph(state_schema=ToTState, context_schema=Context)
+# -----------------------------
+# Data structures
+# -----------------------------
+@dataclass
+class Candidate:
+    text: str
+    heuristic: float = 0.0  # number of votes (for vote-based heuristic)
 
-    # Nodes
-    def expand(state: Dict, *, runtime: Runtime[Context]):
-        cfg = _ctx(runtime)
-        # On first step we have no seed; afterwards we branch by seeding with each pruned candidate.
-        seed = state.get("seed")
-        solver = task.build_solver(llm, k=cfg["k"])
-        return solver({"problem": state["problem"], "seed": seed})
 
-    def score(state: Dict, *, runtime: Runtime[Context]):
-        scored = [task.score(state["problem"], c) for c in state["candidates"]]
-        return {"scored": scored, "candidates": "clear"}
+class BatchSample(BaseModel):
+    # Best-effort parser when the model returns JSON (not required)
+    items: List[str] = Field(default_factory=list)
 
-    def prune(state: Dict, *, runtime: Runtime[Context]):
-        cfg = _ctx(runtime)
-        ordered = sorted(state["scored"], key=lambda sc: sc.score, reverse=True)
-        keep = ordered[: cfg["beam_size"]]
-        return {"candidates": keep, "scored": "clear", "depth": 1}
 
-    def should_continue(state: Dict, runtime: Runtime[Context]):
-        cfg = _ctx(runtime)
-        solved = bool(state["candidates"]) and state["candidates"][0].score is not None \
-                 and state["candidates"][0].score >= cfg["threshold"]
-        if solved or state["depth"] >= cfg["max_depth"]:
-            return "__end__"
-        # Fan out: each kept candidate becomes a seed for the next expand
-        return [Send("expand", {"problem": state["problem"], "seed": c}) for c in state["candidates"]]
+# -----------------------------
+# Parsing helpers
+# -----------------------------
+def parse_numbered_list(text: str, k_expected: int) -> List[str]:
+    """
+    Parse a numbered list 1..k from a chat response.
+    Falls back to splitting lines if formatting is off.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    # Try numbered prefix "1.", "2)", etc.
+    out: List[str] = []
+    cur = []
+    cur_idx = 1
 
-    # Wire graph
-    builder.add_node(expand)
-    builder.add_node(score)
-    builder.add_node(prune)
-    builder.add_edge("__start__", "expand")
-    builder.add_edge("expand", "score")
-    builder.add_edge("score", "prune")
-    builder.add_conditional_edges("prune", should_continue, path_map=["expand", "__end__"])
+    def flush():
+        nonlocal cur, out
+        if cur:
+            out.append(" ".join(cur).strip())
+            cur = []
 
-    return builder.compile(checkpointer=InMemorySaver())
+    for ln in lines:
+        # line starts with the expected index?
+        if ln.startswith(f"{cur_idx}.") or ln.startswith(f"{cur_idx})"):
+            flush()
+            cur = [ln.split(".", 1)[-1].split(")", 1)[-1].strip()]
+            cur_idx += 1
+        else:
+            cur.append(ln)
+    flush()
 
-# ====== Usage examples ======
+    # If nothing parsed, fallback to naive split into k chunks
+    if not out:
+        # try splitting by blank lines
+        para = [p.strip() for p in text.split("\n\n") if p.strip()]
+        out = para[:k_expected] if para else [text.strip()]
+
+    # Ensure k items
+    if len(out) < k_expected:
+        # just duplicate last if too few (robustness)
+        while len(out) < k_expected:
+            out.append(out[-1] if out else "")
+    return out[:k_expected]
+
+
+def parse_vote_best_index(text: str, k: int) -> int:
+    """
+    Extract the integer s from line: 'The best choice is s'
+    Return 1-based index; default to 1 if not found.
+    """
+    last_line = text.strip().splitlines()[-1].strip().lower()
+    # Look for a trailing integer
+    import re
+    m = re.search(r"the best choice is\s+(\d+)", last_line)
+    if not m:
+        return 1
+    s = int(m.group(1))
+    if s < 1 or s > k:
+        return 1
+    return s
+
+
+# -----------------------------
+# ToT for TEXT (BFS + sample + vote)
+# -----------------------------
+def tot_text_bfs(
+    client: OpenAI,
+    model: str,
+    instruction: str,
+    *,
+    temperature: float = 0.7,
+    n_generate_sample: int = 5,   # k thoughts per level (paper often uses 5)
+    n_evaluate_sample: int = 3,   # how many vote calls (majority vote)
+    n_select_sample: int = 1,     # beam width b (paper used 1 for TEXT)
+    max_depth: int = 3,           # levels of BFS
+    verbose: bool = True,
+) -> Tuple[str, Dict]:
+    """
+    Tree-of-Thoughts BFS for creative-writing style tasks:
+    - generator: 'sample' → produce k parallel candidates
+    - evaluator: 'vote'   → majority-vote among candidates
+
+    Returns best passage and a small info dict with traces.
+    """
+    # Level 0: frontier holds one "state" → the instruction itself
+    frontier: List[str] = [instruction]
+    trace = []
+
+    for depth in range(1, max_depth + 1):
+        all_children: List[Candidate] = []
+
+        for state_idx, state in enumerate(frontier, start=1):
+            # 1) Generate k candidates (SAMPLE)
+            user_prompt = SAMPLE_USER_TEMPLATE.format(instruction=state, k=n_generate_sample)
+            gen = chat_complete(client, model, SYSTEM_SAMPLE, user_prompt, temperature)
+            passages = parse_numbered_list(gen, n_generate_sample)
+
+            # 2) EVALUATE by voting: run the judge n_evaluate_sample times
+            votes = [0] * n_generate_sample
+            choices_str = "\n".join([f"{i+1}. {p}" for i, p in enumerate(passages)])
+
+            for _ in range(n_evaluate_sample):
+                judge_resp = chat_complete(
+                    client, model, SYSTEM_VOTE,
+                    VOTE_USER_TEMPLATE.format(instruction=state, choices_str=choices_str, s="{s}"),
+                    temperature=0.0,
+                )
+                best_idx = parse_vote_best_index(judge_resp, n_generate_sample)
+                votes[best_idx - 1] += 1
+
+            # 3) Add children with vote-heuristics
+            for p, v in zip(passages, votes):
+                all_children.append(Candidate(text=p, heuristic=float(v)))
+
+            if verbose:
+                print(f"\n[Depth {depth} | Parent {state_idx}]")
+                for i, (p, v) in enumerate(zip(passages, votes), start=1):
+                    print(f"  {i:>2}. (votes={v}) {p[:140]}")
+
+        # 4) PRUNE: keep top-b by votes (ties keep earlier ones)
+        all_children.sort(key=lambda c: c.heuristic, reverse=True)
+        kept = all_children[: max(1, n_select_sample)]
+        frontier = [c.text for c in kept]
+        trace.append(
+            {
+                "depth": depth,
+                "generated": [c.text for c in all_children],
+                "votes": [c.heuristic for c in all_children],
+                "kept": [c.text for c in kept],
+            }
+        )
+
+        # optional early stop: if unanimous & strong, stop
+        if kept and kept[0].heuristic >= max(2, n_evaluate_sample):
+            break
+
+    best = frontier[0] if frontier else ""
+    return best, {"trace": trace}
+
+
+# -----------------------------
+# Naïve baselines (IO / CoT)
+# -----------------------------
+def naive_io(
+    client: OpenAI, model: str, instruction: str, temperature: float = 0.7
+) -> str:
+    system = "You are a helpful writing model. Follow the instruction precisely."
+    user = f"Instruction:\n{instruction}\n\nWrite a concise passage (4-6 sentences)."
+    return chat_complete(client, model, system, user, temperature)
+
+def naive_cot(
+    client: OpenAI, model: str, instruction: str, temperature: float = 0.7
+) -> str:
+    gen = chat_complete(client, model, SYSTEM_COT, COT_USER_TEMPLATE.format(instruction=instruction), temperature)
+    return gen
+
+
+# -----------------------------
+# CLI
+# -----------------------------
+def main():
+    parser = argparse.ArgumentParser(description="ToT (TEXT) single-file runner")
+    parser.add_argument("--model", default="gpt-4o-mini", type=str, help="OpenAI chat model")
+    parser.add_argument("--temperature", default=0.7, type=float)
+    parser.add_argument("--instruction", required=True, type=str, help="Creative writing instruction/premise")
+
+    # flags to mirror official repo run.py semantics for paper tasks
+    parser.add_argument("--naive_run", action="store_true", help="If set, run naive baseline instead of ToT")
+    parser.add_argument("--prompt_sample", choices=["standard", "cot"], default="standard",
+                        help="For naive runs: standard (IO) vs cot")
+    parser.add_argument("--method_generate", choices=["sample"], default="sample",
+                        help="Generator for TEXT is 'sample' (fixed here).")
+    parser.add_argument("--method_evaluate", choices=["vote"], default="vote",
+                        help="Evaluator for TEXT is 'vote' (fixed here).")
+
+    parser.add_argument("--n_generate_sample", default=5, type=int, help="k (thoughts per level)")
+    parser.add_argument("--n_evaluate_sample", default=3, type=int, help="# judge votes per level")
+    parser.add_argument("--n_select_sample", default=1, type=int, help="beam width b")
+    parser.add_argument("--max_depth", default=3, type=int, help="BFS depth")
+    parser.add_argument("--verbose", action="store_true", help="Print intermediate results")
+
+    args = parser.parse_args()
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Please set OPENAI_API_KEY environment variable.")
+
+    client = OpenAI(api_key=api_key)
+
+    if args.naive_run:
+        if args.prompt_sample == "cot":
+            out = naive_cot(client, args.model, args.instruction, args.temperature)
+        else:
+            out = naive_io(client, args.model, args.instruction, args.temperature)
+        print("\n=== Output (Naive) ===\n" + out)
+        return
+
+    # ToT BFS (TEXT)
+    best, info = tot_text_bfs(
+        client=client,
+        model=args.model,
+        instruction=args.instruction,
+        temperature=args.temperature,
+        n_generate_sample=args.n_generate_sample,
+        n_evaluate_sample=args.n_evaluate_sample,
+        n_select_sample=args.n_select_sample,
+        max_depth=args.max_depth,
+        verbose=args.verbose,
+    )
+
+    print("\n=== Best Passage (ToT) ===\n" + best)
+    # Optional: save trace JSON for analysis
+    # print(json.dumps(info, indent=2))
+
 
 if __name__ == "__main__":
-    # Example 1: Game of 24
-    game = Game24Task()
-    graph_24 = build_tot_graph(game)
-    problem_24 = "4 5 6 10"   # classic 24-puzzle instance
-    # Stream steps (optional); the best candidate is always candidates[0]
-    for ev in graph_24.stream({"problem": problem_24},
-                              context={"beam_size": 5, "k": 5, "threshold": 0.999, "max_depth": 10},
-                              config={"configurable": {"thread_id": "tot_24_demo"}}):
-        print(ev)
-    print("Best:", graph_24.invoke({"problem": problem_24},
-                                   context={"beam_size": 5, "k": 5, "threshold": 0.999, "max_depth": 10}
-                                   )["candidates"][0])
-
-    # Example 2: Creative writing
-    writing = WritingTask(rubric="coherence, novelty, hook, vivid imagery")
-    graph_write = build_tot_graph(writing)
-    premise = "A solar-punk city depends on a giant algae reef that suddenly stops growing."
-    result = graph_write.invoke({"problem": premise},
-                                context={"beam_size": 3, "k": 4, "threshold": 0.8, "max_depth": 4})
-    best_opening = result["candidates"][0]
-    print("\nBest opening:", best_opening.text, "\nScore:", best_opening.score, "\nWhy:", best_opening.feedback)
+    main()
