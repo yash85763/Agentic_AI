@@ -3,7 +3,6 @@ from pydantic import BaseModel, Field
 from enum import Enum
 import json
 from datetime import datetime
-from abc import ABC, abstractmethod
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
@@ -93,16 +92,12 @@ class ReflexionState(BaseModel):
     memory: Memory = Field(default_factory=Memory)
 
 
-class BaseLLM(ABC):
+class BaseLLM:
     """Base class for LLM components"""
     
     def __init__(self, llm: BaseLanguageModel, temperature: float = 0.1):
         self.llm = llm
         self.temperature = temperature
-    
-    @abstractmethod
-    def process(self, *args, **kwargs):
-        pass
 
 
 class ActorLLM(BaseLLM):
