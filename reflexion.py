@@ -1,428 +1,396 @@
-# reflexion.py
-"""
-Reflexion pattern implemented with:
-1) LangGraph (if available), or
-2) A framework-free orchestrator fallback.
-
-Components:
-- Solver: initial answer
-- Critic: targeted feedback
-- Reviser: improves answer using critiques
-- Judge: scores (overall + sub-scores), controls early stop
-
-Features:
-- Pluggable LLM + judge
-- Config via dataclass
-- Structured logging
-- Backoff retries
-- Deterministic defaults
-"""
-
-from __future__ import annotations
-
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from enum import Enum
 import json
-import logging
-import os
-import sys
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, TypedDict, Any
+from datetime import datetime
 
-import backoff
-
-# --------------------------- Logging ---------------------------
-
-def _setup_logger() -> logging.Logger:
-    logger = logging.getLogger("reflexion")
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-        handler.setFormatter(logging.Formatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S"))
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
-
-log = _setup_logger()
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.language_models import BaseLanguageModel
+from langchain_openai import ChatOpenAI  # or your preferred LLM
 
 
-# --------------------------- Config ---------------------------
-
-@dataclass(frozen=True)
-class ReflexionConfig:
-    max_rounds: int = 3
-    success_threshold: float = 0.85
-    model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    temperature: float = 0.2
-    max_output_tokens: int = 800
-    critique_history: int = 3
-    # judge weights for overall score = sum(weights[k] * score_k)
-    judge_weights: Dict[str, float] = field(default_factory=lambda: {
-        "correctness": 0.5,
-        "relevance": 0.2,
-        "completeness": 0.2,
-        "clarity": 0.1,
-    })
+class ReflexionStep(str, Enum):
+    THINKING = "thinking"
+    ACTING = "acting"
+    REFLECTING = "reflecting"
+    MEMORY_UPDATE = "memory_update"
 
 
-# --------------------------- LLM Adapter ---------------------------
+class ActionType(str, Enum):
+    SEARCH = "search"
+    CALCULATE = "calculate"
+    REASON = "reason"
+    ANSWER = "answer"
+    ASK_CLARIFICATION = "ask_clarification"
 
-class ChatLLM:
+
+class Action(BaseModel):
+    """Represents an action the agent can take"""
+    type: ActionType
+    content: str
+    reasoning: str = Field(description="Why this action was chosen")
+
+
+class ActionResult(BaseModel):
+    """Result of executing an action"""
+    action: Action
+    result: str
+    success: bool
+    error_message: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class Reflection(BaseModel):
+    """Reflection on a failed attempt"""
+    attempt_summary: str = Field(description="Summary of what was attempted")
+    failure_analysis: str = Field(description="Analysis of why it failed")
+    lessons_learned: str = Field(description="Key lessons from this failure")
+    improvement_strategy: str = Field(description="How to improve next time")
+    confidence_score: float = Field(ge=0.0, le=1.0, description="Confidence in the reflection")
+
+
+class Memory(BaseModel):
+    """Long-term memory for storing experiences"""
+    successful_strategies: List[str] = Field(default_factory=list)
+    common_pitfalls: List[str] = Field(default_factory=list)
+    domain_knowledge: Dict[str, Any] = Field(default_factory=dict)
+    reflection_history: List[Reflection] = Field(default_factory=list)
+
+
+class ReflexionState(BaseModel):
+    """Current state of the Reflexion agent"""
+    task: str
+    current_step: ReflexionStep = ReflexionStep.THINKING
+    attempt_count: int = 0
+    max_attempts: int = 3
+    
+    # Current attempt state
+    current_reasoning: str = ""
+    planned_actions: List[Action] = Field(default_factory=list)
+    executed_actions: List[ActionResult] = Field(default_factory=list)
+    
+    # Results and reflections
+    final_answer: Optional[str] = None
+    current_reflection: Optional[Reflection] = None
+    is_complete: bool = False
+    
+    # Memory
+    memory: Memory = Field(default_factory=Memory)
+
+
+class ReflexionAgent:
     """
-    Minimal OpenAI (or compatible) chat wrapper.
-    Expects OPENAI_API_KEY. Optional: OPENAI_BASE_URL.
+    Reflexion reasoning agent that can reflect on failures and improve
     """
-
-    def __init__(self, model: str, temperature: float, max_tokens: int):
-        from openai import OpenAI  # import here to avoid hard dependency at module load
-        base_url = os.getenv("OPENAI_BASE_URL")
-        self.client = OpenAI(base_url=base_url) if base_url else OpenAI()
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-
-    @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=None)
-    def chat(self, system: str, user: str) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
-        return (resp.choices[0].message.content or "").strip()
-
-
-# --------------------------- Prompts ---------------------------
-
-SOLVER_SYSTEM = (
-    "You are a careful, concise problem solver. Provide factual answers. "
-    "If unsure, say you are unsure and suggest what would resolve uncertainty."
-)
-
-CRITIC_SYSTEM = (
-    "You are a rigorous critic. Identify concrete issues in the answer: "
-    "factual errors, missing details, irrelevance, ambiguity. "
-    "Return actionable, specific suggestions for improvement, not a rewrite."
-)
-
-REVISER_SYSTEM = (
-    "You revise answers using the critiques. Fix issues precisely and keep the answer "
-    "concise, accurate, and directly responsive to the question."
-)
-
-JUDGE_SYSTEM = (
-    "You are a strict evaluator. Return valid JSON only with keys: "
-    "correctness, relevance, completeness, clarity, overall — each in [0,1]. "
-    "The 'overall' is a weighted sum per the rubric."
-)
-
-
-def judge_user_prompt(question: str, answer: str, weights: Dict[str, float]) -> str:
-    return f"""
-Question:
-{question}
-
-Answer:
-{answer}
-
-Rubric (weights):
-- correctness: {weights['correctness']}
-- relevance: {weights['relevance']}
-- completeness: {weights['completeness']}
-- clarity: {weights['clarity']}
-
-Score each dimension in [0,1].
-Compute overall = sum_i w_i * score_i.
-Return ONLY JSON, e.g.:
-{{"correctness":0.9,"relevance":0.9,"completeness":0.8,"clarity":0.8,"overall":0.86}}
-""".strip()
-
-
-# --------------------------- Components ---------------------------
-
-class Solver:
-    def __init__(self, llm: ChatLLM):
+    
+    def __init__(self, llm: BaseLanguageModel, max_attempts: int = 3):
         self.llm = llm
+        self.max_attempts = max_attempts
+        
+        # Initialize parsers
+        self.action_parser = PydanticOutputParser(pydantic_object=Action)
+        self.reflection_parser = PydanticOutputParser(pydantic_object=Reflection)
+        
+        # Initialize prompts
+        self._setup_prompts()
+    
+    def _setup_prompts(self):
+        """Setup prompt templates for different phases"""
+        
+        # Thinking phase prompt
+        self.thinking_prompt = PromptTemplate(
+            input_variables=["task", "memory", "attempt_count", "previous_attempts"],
+            template="""
+You are a reasoning agent using Reflexion methodology. Your task is to think through the problem and plan your approach.
 
-    def __call__(self, question: str) -> str:
-        prompt = (
-            "Solve the user's question carefully and succinctly. "
-            "If numeric, show key steps briefly. Prefer <150 words unless asked."
-            f"\n\nQuestion:\n{question}"
+TASK: {task}
+
+ATTEMPT: {attempt_count}/{max_attempts}
+
+MEMORY FROM PREVIOUS EXPERIENCES:
+Successful strategies: {memory.successful_strategies}
+Common pitfalls: {memory.common_pitfalls}
+Previous reflections: {memory.reflection_history}
+
+PREVIOUS ATTEMPTS (if any):
+{previous_attempts}
+
+Think step by step about how to approach this task. Consider:
+1. What is the core problem?
+2. What information do you need?
+3. What are potential approaches?
+4. What have you learned from previous attempts?
+5. What strategy will you use?
+
+Provide your reasoning:
+""",
+            partial_variables={"max_attempts": self.max_attempts}
         )
-        return self.llm.chat(SOLVER_SYSTEM, prompt)
+        
+        # Action planning prompt
+        self.action_prompt = PromptTemplate(
+            input_variables=["task", "reasoning", "memory"],
+            template="""
+Based on your reasoning, plan the next action to take.
 
+TASK: {task}
+REASONING: {reasoning}
+MEMORY: {memory}
 
-class Critic:
-    def __init__(self, llm: ChatLLM):
-        self.llm = llm
+Plan your next action. Consider what type of action would be most effective.
 
-    def __call__(self, question: str, answer: str) -> str:
-        prompt = (
-            "Critique the answer. Be specific and actionable. "
-            "List issues as bullets, each with a suggested fix. "
-            "Do NOT rewrite the whole answer.\n\n"
-            f"Question:\n{question}\n\nAnswer:\n{answer}"
+{format_instructions}
+""",
+            partial_variables={"format_instructions": self.action_parser.get_format_instructions()}
         )
-        return self.llm.chat(CRITIC_SYSTEM, prompt)
+        
+        # Reflection prompt
+        self.reflection_prompt = PromptTemplate(
+            input_variables=["task", "attempt_summary", "actions_taken", "final_result"],
+            template="""
+You need to reflect on a failed attempt at solving a task.
 
+TASK: {task}
 
-class Reviser:
-    def __init__(self, llm: ChatLLM):
-        self.llm = llm
+ATTEMPT SUMMARY: {attempt_summary}
 
-    def __call__(self, question: str, prior_answer: str, critiques: List[str]) -> str:
-        # compact critique list
-        joined = "- " + "\n- ".join(c.strip() for c in critiques[-8:])
-        prompt = (
-            "Revise the prior answer strictly according to the critiques. "
-            "Keep it concise, correct, and directly answers the question.\n\n"
-            f"Question:\n{question}\n\nPrior Answer:\n{prior_answer}\n\nCritiques:\n{joined}"
+ACTIONS TAKEN:
+{actions_taken}
+
+FINAL RESULT: {final_result}
+
+Reflect deeply on what went wrong and how to improve. Be specific and actionable.
+
+{format_instructions}
+""",
+            partial_variables={"format_instructions": self.reflection_parser.get_format_instructions()}
         )
-        return self.llm.chat(REVISER_SYSTEM, prompt)
-
-
-class Judge:
-    def __init__(self, llm: ChatLLM, weights: Dict[str, float]):
-        self.llm = llm
-        self.weights = weights
-
-    def __call__(self, question: str, answer: str) -> Tuple[float, Dict[str, float], str]:
-        raw = self.llm.chat(JUDGE_SYSTEM, judge_user_prompt(question, answer, self.weights))
-        try:
-            scores = json.loads(raw)
-            # normalize and clamp
-            subs = {}
-            for k in ["correctness", "relevance", "completeness", "clarity"]:
-                subs[k] = max(0.0, min(1.0, float(scores.get(k, 0.0))))
-            overall = float(scores.get("overall", 0.0))
-            overall = max(0.0, min(1.0, overall))
-            return overall, subs, "LM-judge"
-        except Exception as e:
-            log.warning(f"Judge JSON parse failed: {e}. Raw: {raw[:180]}")
-            return 0.0, {"correctness": 0, "relevance": 0, "completeness": 0, "clarity": 0}, "parse_error"
-
-
-# --------------------------- Shared State ---------------------------
-
-class ReflexionState(TypedDict, total=False):
-    question: str
-    answer: str
-    critiques: List[str]
-    round: int
-    score: float
-    subs: Dict[str, float]
-    history: List[Dict[str, Any]]
-    max_rounds: int
-    threshold: float
-
-
-# --------------------------- Orchestrator (no framework) ---------------------------
-
-class ReflexionLoop:
-    """Framework-free Reflexion loop (used as fallback or for simple deployments)."""
-
-    def __init__(self, cfg: ReflexionConfig, solver: Solver, critic: Critic, reviser: Reviser, judge: Judge):
-        self.cfg = cfg
-        self.solver = solver
-        self.critic = critic
-        self.reviser = reviser
-        self.judge = judge
-
-    def run(self, question: str) -> Dict[str, Any]:
-        state: ReflexionState = {
-            "question": question,
-            "critiques": [],
-            "round": 1,
-            "history": [],
-            "max_rounds": self.cfg.max_rounds,
-            "threshold": self.cfg.success_threshold,
-        }
-
-        # Round 1: solve
-        answer = self.solver(question)
-        score, subs, _ = self.judge(question, answer)
-        state["answer"] = answer
-        state["score"] = score
-        state["subs"] = subs
-        state["history"].append({"round": 1, "answer": answer, "score": score, "subs": subs})
-        log.info(f"[Round 1] score={score:.2f} subs={subs}")
-
-        if score >= self.cfg.success_threshold:
-            log.info("[Early Stop] Success at round 1.")
-            return {"final_answer": answer, "rounds": 1, "history": state["history"]}
-
-        # Rounds 2..N
-        while state["round"] < self.cfg.max_rounds:
-            state["round"] += 1
-            critique = self.critic(question, state["answer"])
-            state["critiques"].append(critique)
-            # limit critique memory
-            if len(state["critiques"]) > self.cfg.critique_history:
-                state["critiques"] = state["critiques"][-self.cfg.critique_history:]
-
-            improved = self.reviser(question, state["answer"], state["critiques"])
-            score, subs, _ = self.judge(question, improved)
-            state["answer"] = improved
-            state["score"] = score
-            state["subs"] = subs
-            state["history"].append(
-                {"round": state["round"], "answer": improved, "critique": critique, "score": score, "subs": subs}
-            )
-            log.info(f"[Round {state['round']}] score={score:.2f} subs={subs}")
-
-            if score >= self.cfg.success_threshold:
-                log.info("[Early Stop] Threshold reached.")
+    
+    def solve(self, task: str, context: Dict[str, Any] = None) -> ReflexionState:
+        """
+        Main method to solve a task using Reflexion reasoning
+        """
+        state = ReflexionState(task=task, max_attempts=self.max_attempts)
+        
+        while not state.is_complete and state.attempt_count < state.max_attempts:
+            state.attempt_count += 1
+            print(f"\n--- ATTEMPT {state.attempt_count} ---")
+            
+            # Thinking phase
+            state.current_step = ReflexionStep.THINKING
+            self._thinking_phase(state)
+            
+            # Acting phase
+            state.current_step = ReflexionStep.ACTING
+            self._acting_phase(state, context)
+            
+            # Check if we have a satisfactory answer
+            if self._evaluate_attempt(state):
+                state.is_complete = True
+                print("✅ Task completed successfully!")
                 break
+            
+            # Reflecting phase (if not the last attempt)
+            if state.attempt_count < state.max_attempts:
+                state.current_step = ReflexionStep.REFLECTING
+                self._reflecting_phase(state)
+                
+                # Memory update phase
+                state.current_step = ReflexionStep.MEMORY_UPDATE
+                self._update_memory(state)
+        
+        if not state.is_complete:
+            print(f"❌ Task not completed after {state.max_attempts} attempts")
+        
+        return state
+    
+    def _thinking_phase(self, state: ReflexionState):
+        """Think through the problem and develop reasoning"""
+        print("🤔 THINKING...")
+        
+        # Prepare previous attempts summary
+        previous_attempts = ""
+        if state.memory.reflection_history:
+            previous_attempts = "\n".join([
+                f"Attempt {i+1}: {reflection.attempt_summary} -> {reflection.failure_analysis}"
+                for i, reflection in enumerate(state.memory.reflection_history)
+            ])
+        
+        prompt = self.thinking_prompt.format(
+            task=state.task,
+            memory=state.memory,
+            attempt_count=state.attempt_count,
+            previous_attempts=previous_attempts or "None"
+        )
+        
+        response = self.llm.invoke(prompt)
+        state.current_reasoning = response.content
+        print(f"Reasoning: {state.current_reasoning[:200]}...")
+    
+    def _acting_phase(self, state: ReflexionState, context: Dict[str, Any] = None):
+        """Execute actions based on reasoning"""
+        print("🎯 ACTING...")
+        
+        # Plan and execute multiple actions
+        for step in range(3):  # Allow up to 3 actions per attempt
+            # Plan next action
+            action_prompt = self.action_prompt.format(
+                task=state.task,
+                reasoning=state.current_reasoning,
+                memory=json.dumps(state.memory.dict(), indent=2)
+            )
+            
+            try:
+                action_response = self.llm.invoke(action_prompt)
+                action = self.action_parser.parse(action_response.content)
+                state.planned_actions.append(action)
+                
+                # Execute action
+                result = self._execute_action(action, context)
+                state.executed_actions.append(result)
+                
+                print(f"Action: {action.type} -> {result.result[:100]}...")
+                
+                # Check if this is a final answer
+                if action.type == ActionType.ANSWER:
+                    state.final_answer = result.result
+                    break
+                    
+            except Exception as e:
+                print(f"Error in action phase: {e}")
+                break
+    
+    def _execute_action(self, action: Action, context: Dict[str, Any] = None) -> ActionResult:
+        """Execute a specific action"""
+        try:
+            if action.type == ActionType.SEARCH:
+                # Simulate search (in real implementation, this would call actual search)
+                result = f"Search results for: {action.content}"
+                
+            elif action.type == ActionType.CALCULATE:
+                # Simple calculation execution (extend as needed)
+                try:
+                    result = str(eval(action.content))  # Warning: unsafe for production
+                except:
+                    result = "Calculation error"
+                    
+            elif action.type == ActionType.REASON:
+                # Use LLM for reasoning
+                reasoning_prompt = f"Reason about: {action.content}"
+                response = self.llm.invoke(reasoning_prompt)
+                result = response.content
+                
+            elif action.type == ActionType.ANSWER:
+                result = action.content
+                
+            else:
+                result = f"Executed {action.type}: {action.content}"
+            
+            return ActionResult(
+                action=action,
+                result=result,
+                success=True
+            )
+            
+        except Exception as e:
+            return ActionResult(
+                action=action,
+                result="",
+                success=False,
+                error_message=str(e)
+            )
+    
+    def _evaluate_attempt(self, state: ReflexionState) -> bool:
+        """Evaluate if the current attempt is satisfactory"""
+        # Simple evaluation - in practice, this could be more sophisticated
+        if state.final_answer:
+            # You could add more sophisticated evaluation here
+            # For example, checking against ground truth, using another LLM to evaluate, etc.
+            return len(state.final_answer.strip()) > 10  # Simple length check
+        return False
+    
+    def _reflecting_phase(self, state: ReflexionState):
+        """Reflect on the failed attempt"""
+        print("🔍 REFLECTING...")
+        
+        attempt_summary = f"Attempt {state.attempt_count}: {state.current_reasoning[:100]}..."
+        actions_taken = "\n".join([
+            f"{i+1}. {result.action.type}: {result.action.content} -> {result.result[:50]}..."
+            for i, result in enumerate(state.executed_actions)
+        ])
+        
+        final_result = state.final_answer or "No final answer provided"
+        
+        reflection_prompt = self.reflection_prompt.format(
+            task=state.task,
+            attempt_summary=attempt_summary,
+            actions_taken=actions_taken,
+            final_result=final_result
+        )
+        
+        try:
+            reflection_response = self.llm.invoke(reflection_prompt)
+            reflection = self.reflection_parser.parse(reflection_response.content)
+            state.current_reflection = reflection
+            print(f"Reflection: {reflection.lessons_learned[:100]}...")
+        except Exception as e:
+            print(f"Error in reflection: {e}")
+    
+    def _update_memory(self, state: ReflexionState):
+        """Update long-term memory with learnings"""
+        print("💾 UPDATING MEMORY...")
+        
+        if state.current_reflection:
+            # Add reflection to history
+            state.memory.reflection_history.append(state.current_reflection)
+            
+            # Extract learnings for future use
+            if state.current_reflection.improvement_strategy:
+                state.memory.successful_strategies.append(
+                    state.current_reflection.improvement_strategy
+                )
+            
+            if state.current_reflection.failure_analysis:
+                state.memory.common_pitfalls.append(
+                    state.current_reflection.failure_analysis
+                )
+        
+        # Reset current attempt state for next iteration
+        state.planned_actions = []
+        state.executed_actions = []
+        state.current_reflection = None
+        state.final_answer = None
 
-        return {"final_answer": state["answer"], "rounds": state["round"], "history": state["history"]}
 
-
-# --------------------------- LangGraph Graph (optional) ---------------------------
-
-def build_langgraph_app(cfg: ReflexionConfig, solver: Solver, critic: Critic, reviser: Reviser, judge: Judge):
-    """
-    Build a LangGraph app that implements the Reflexion loop.
-    Requires `pip install langgraph`. Falls back to framework-free if not installed.
-    """
-    try:
-        from langgraph.graph import StateGraph, END
-    except Exception as e:
-        log.warning(f"LangGraph not available ({e}); using framework-free loop.")
-        return None
-
-    class LGState(TypedDict, total=False):
-        # mirror ReflexionState keys used in nodes
-        question: str
-        answer: str
-        critiques: List[str]
-        round: int
-        score: float
-        subs: Dict[str, float]
-        history: List[Dict[str, Any]]
-        max_rounds: int
-        threshold: float
-
-    def node_solve(state: LGState) -> LGState:
-        if not state.get("round"):
-            state["round"] = 1
-        ans = solver(state["question"])
-        return {**state, "answer": ans}
-
-    def node_judge(state: LGState) -> LGState:
-        score, subs, _ = judge(state["question"], state["answer"])
-        hist = list(state.get("history", []))
-        # if last item is same round (after revise), append; if first judge after solve, also append
-        hist.append({"round": state.get("round", 1), "answer": state["answer"], "score": score, "subs": subs})
-        return {**state, "score": score, "subs": subs, "history": hist}
-
-    def node_critique(state: LGState) -> LGState:
-        c = critic(state["question"], state["answer"])
-        critiques = list(state.get("critiques", [])) + [c]
-        # trim
-        if len(critiques) > cfg.critique_history:
-            critiques = critiques[-cfg.critique_history:]
-        return {**state, "critiques": critiques}
-
-    def node_revise(state: LGState) -> LGState:
-        improved = reviser(state["question"], state["answer"], state.get("critiques", []))
-        return {**state, "answer": improved, "round": state.get("round", 1) + 1}
-
-    def should_continue(state: LGState) -> str:
-        if state.get("score", 0.0) >= state.get("threshold", cfg.success_threshold):
-            return "end"
-        if state.get("round", 1) >= state.get("max_rounds", cfg.max_rounds):
-            return "end"
-        return "critique"
-
-    graph = StateGraph(LGState)
-    graph.add_node("solve", node_solve)
-    graph.add_node("judge", node_judge)
-    graph.add_node("critique", node_critique)
-    graph.add_node("revise", node_revise)
-
-    graph.set_entry_point("solve")
-    graph.add_edge("solve", "judge")
-    graph.add_conditional_edges("judge", should_continue, {"end": END, "critique": "critique"})
-    graph.add_edge("critique", "revise")
-    graph.add_edge("revise", "judge")
-
-    # Optional: add a checkpointer if available (won't be used in this simple run)
-    # from langgraph.checkpoint.memory import MemorySaver
-    # app = graph.compile(checkpointer=MemorySaver())
-    app = graph.compile()
-    log.info("LangGraph app compiled.")
-    return app
-
-
-# --------------------------- Wiring & Demo ---------------------------
-
-def build_components(cfg: ReflexionConfig) -> Tuple[ChatLLM, Solver, Critic, Reviser, Judge]:
-    llm = ChatLLM(model=cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_output_tokens)
-    return llm, Solver(llm), Critic(llm), Reviser(llm), Judge(llm, cfg.judge_weights)
-
-def demo_question() -> str:
-    return (
-        "In 120 words or fewer, explain the Reflexion pattern for LLMs and give a tiny example. "
-        "Be concrete."
-    )
-
-def run_with_langgraph(question: str, cfg: ReflexionConfig) -> Dict[str, Any]:
-    _, solver, critic, reviser, judge = build_components(cfg)
-    app = build_langgraph_app(cfg, solver, critic, reviser, judge)
-    if app is None:
-        # fallback
-        loop = ReflexionLoop(cfg, solver, critic, reviser, judge)
-        return loop.run(question)
-
-    # initialize state
-    init_state: ReflexionState = {
-        "question": question,
-        "critiques": [],
-        "round": 1,
-        "history": [],
-        "max_rounds": cfg.max_rounds,
-        "threshold": cfg.success_threshold,
-    }
-
-    # Run graph to completion (until END)
-    final_state = None
-    for event in app.stream(init_state):
-        # `event` yields node outputs in order; capture the last
-        for _, s in event.items():
-            final_state = s
-
-    # Prepare output
-    history = final_state.get("history", []) if final_state else []
-    rounds = history[-1]["round"] if history else 1
-    answer = final_state.get("answer", "") if final_state else ""
-    return {"final_answer": answer, "rounds": rounds, "history": history}
-
-def run_framework_free(question: str, cfg: ReflexionConfig) -> Dict[str, Any]:
-    _, solver, critic, reviser, judge = build_components(cfg)
-    loop = ReflexionLoop(cfg, solver, critic, reviser, judge)
-    return loop.run(question)
-
+# Example usage
 def main():
-    cfg = ReflexionConfig()
-    question = demo_question()
+    """Example of how to use the Reflexion agent"""
+    
+    # Initialize LLM (replace with your preferred model)
+    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1)
+    
+    # Create Reflexion agent
+    agent = ReflexionAgent(llm, max_attempts=3)
+    
+    # Example task
+    task = "Solve this math word problem: If a train travels 120 miles in 2 hours, and then travels 180 miles in 3 hours, what is the average speed for the entire journey?"
+    
+    # Solve the task
+    result = agent.solve(task)
+    
+    # Print results
+    print(f"\n=== FINAL RESULTS ===")
+    print(f"Task: {result.task}")
+    print(f"Attempts made: {result.attempt_count}")
+    print(f"Completed: {result.is_complete}")
+    print(f"Final answer: {result.final_answer}")
+    
+    if result.memory.reflection_history:
+        print(f"\nReflections made: {len(result.memory.reflection_history)}")
+        for i, reflection in enumerate(result.memory.reflection_history):
+            print(f"Reflection {i+1}: {reflection.lessons_learned}")
 
-    prefer_plain = os.getenv("REFLEXION_NO_FRAMEWORK", "0") == "1"
-    if prefer_plain:
-        log.info("Running framework-free Reflexion loop...")
-        result = run_framework_free(question, cfg)
-    else:
-        log.info("Attempting to run with LangGraph (fallback to plain if unavailable)...")
-        result = run_with_langgraph(question, cfg)
-
-    print("\n=== FINAL ANSWER ===\n" + result["final_answer"])
-    print("\n=== TRACE ===")
-    for h in result["history"]:
-        print(f"Round {h['round']}: score={h.get('score', 0):.2f}, subs={h.get('subs', {})}")
-        if "critique" in h:
-            snippet = h["critique"][:200]
-            print(f"  critique: {snippet}{'...' if len(h['critique'])>200 else ''}")
 
 if __name__ == "__main__":
     main()
