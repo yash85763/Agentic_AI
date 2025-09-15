@@ -1,7 +1,8 @@
 from typing import List, Optional, Dict, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from enum import Enum
 import json
+import re
 from datetime import datetime
 
 from langchain_core.prompts import PromptTemplate
@@ -93,11 +94,107 @@ class ReflexionState(BaseModel):
 
 
 class BaseLLM:
-    """Base class for LLM components"""
+    """Base class for LLM components with robust parsing"""
     
     def __init__(self, llm: BaseLanguageModel, temperature: float = 0.1):
         self.llm = llm
         self.temperature = temperature
+    
+    def _extract_json_from_response(self, response_text: str) -> Optional[Dict]:
+        """Extract JSON from LLM response, handling various formats"""
+        try:
+            # First, try to parse the entire response as JSON
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Look for JSON blocks in the response
+        json_patterns = [
+            r'```json\s*(\{.*?\})\s*```',  # JSON in code blocks
+            r'```\s*(\{.*?\})\s*```',      # JSON in generic code blocks
+            r'(\{[^{}]*"[^"]*"[^{}]*\})',  # Simple JSON objects
+            r'(\{.*\})'                    # Any JSON-like structure
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, response_text, re.DOTALL)
+            for match in matches:
+                try:
+                    return json.loads(match.strip())
+                except json.JSONDecodeError:
+                    continue
+        
+        return None
+    
+    def _safe_parse_with_fallback(self, response_text: str, parser: PydanticOutputParser, fallback_creator):
+        """Safely parse LLM response with fallback options"""
+        try:
+            # First, try normal parsing
+            return parser.parse(response_text)
+        except Exception as e:
+            print(f"Warning: Normal parsing failed: {e}")
+            
+            # Try to extract JSON from the response
+            json_data = self._extract_json_from_response(response_text)
+            if json_data:
+                try:
+                    # Try to create the Pydantic model from the JSON
+                    return parser.pydantic_object(**json_data)
+                except Exception as e2:
+                    print(f"Warning: JSON parsing failed: {e2}")
+            
+            # Create fallback object
+            print("Using fallback parsing...")
+            return fallback_creator(response_text)
+    
+    def _create_action_fallback(self, response_text: str) -> Action:
+        """Create fallback Action from raw response"""
+        # Try to extract action type from text
+        action_type = ActionType.REASON  # Default
+        if "search" in response_text.lower():
+            action_type = ActionType.SEARCH
+        elif "calculate" in response_text.lower() or any(op in response_text for op in ['+', '-', '*', '/', '=']):
+            action_type = ActionType.CALCULATE
+        elif "answer" in response_text.lower() or "final" in response_text.lower():
+            action_type = ActionType.ANSWER
+        
+        return Action(
+            type=action_type,
+            content=response_text[:500],  # Truncate to reasonable length
+            reasoning="Fallback parsing - extracted from raw response"
+        )
+    
+    def _create_evaluation_fallback(self, response_text: str) -> EvaluationResult:
+        """Create fallback EvaluationResult from raw response"""
+        # Simple heuristics to determine correctness
+        positive_indicators = ['correct', 'good', 'right', 'accurate', 'well', 'excellent']
+        negative_indicators = ['wrong', 'incorrect', 'bad', 'error', 'mistake', 'fail']
+        
+        text_lower = response_text.lower()
+        positive_count = sum(1 for word in positive_indicators if word in text_lower)
+        negative_count = sum(1 for word in negative_indicators if word in text_lower)
+        
+        is_correct = positive_count > negative_count
+        score = 0.7 if is_correct else 0.3
+        
+        return EvaluationResult(
+            is_correct=is_correct,
+            score=score,
+            feedback=response_text[:300],  # Use response as feedback
+            reasoning="Fallback evaluation based on text analysis",
+            areas_for_improvement=["Unable to parse detailed evaluation"]
+        )
+    
+    def _create_reflection_fallback(self, response_text: str) -> Reflection:
+        """Create fallback Reflection from raw response"""
+        return Reflection(
+            attempt_summary="Parsing failed - using raw response",
+            failure_analysis=response_text[:200],
+            lessons_learned="Need to improve response parsing and formatting",
+            improvement_strategy="Ensure responses follow the expected JSON format",
+            specific_mistakes=["Response format not parseable"],
+            confidence_score=0.3
+        )
 
 
 class ActorLLM(BaseLLM):
@@ -195,7 +292,13 @@ Determine the most appropriate next action. Be specific and purposeful.
         )
         
         response = self.llm.invoke(prompt)
-        return self.action_parser.parse(response.content)
+        
+        # Use safe parsing with fallback
+        return self._safe_parse_with_fallback(
+            response.content, 
+            self.action_parser, 
+            self._create_action_fallback
+        )
 
 
 class EvaluatorLLM(BaseLLM):
@@ -250,7 +353,13 @@ Be strict but fair in your evaluation. Identify specific areas for improvement.
         )
         
         response = self.llm.invoke(prompt)
-        return self.evaluation_parser.parse(response.content)
+        
+        # Use safe parsing with fallback
+        return self._safe_parse_with_fallback(
+            response.content,
+            self.evaluation_parser,
+            self._create_evaluation_fallback
+        )
 
 
 class SelfReflectionLLM(BaseLLM):
@@ -320,7 +429,13 @@ Be brutally honest and specific. The goal is maximum learning from this failure.
         )
         
         response = self.llm.invoke(prompt)
-        return self.reflection_parser.parse(response.content)
+        
+        # Use safe parsing with fallback
+        return self._safe_parse_with_fallback(
+            response.content,
+            self.reflection_parser,
+            self._create_reflection_fallback
+        )
 
 
 class ReflexionAgent:
@@ -378,20 +493,45 @@ class ReflexionAgent:
                     actions_taken=state.executed_actions,
                     ground_truth=ground_truth
                 )
-                print(f"Evaluation: {'✅ CORRECT' if state.current_evaluation.is_correct else '❌ INCORRECT'} "
-                      f"(Score: {state.current_evaluation.score:.2f})")
-                print(f"Feedback: {state.current_evaluation.feedback[:150]}...")
                 
-                # Check if satisfactory
-                if state.current_evaluation.is_correct or state.current_evaluation.score >= 0.8:
-                    state.is_complete = True
-                    print("🎉 Task completed successfully!")
-                    break
+                # Safe access to evaluation result
+                if state.current_evaluation:
+                    print(f"Evaluation: {'✅ CORRECT' if state.current_evaluation.is_correct else '❌ INCORRECT'} "
+                          f"(Score: {state.current_evaluation.score:.2f})")
+                    print(f"Feedback: {state.current_evaluation.feedback[:150]}...")
+                    
+                    # Check if satisfactory
+                    if state.current_evaluation.is_correct or state.current_evaluation.score >= 0.8:
+                        state.is_complete = True
+                        print("🎉 Task completed successfully!")
+                        break
+                else:
+                    print("❌ Evaluation failed - will continue to next attempt")
+            else:
+                print("⚠️ No final answer provided - creating default evaluation")
+                state.current_evaluation = EvaluationResult(
+                    is_correct=False,
+                    score=0.0,
+                    feedback="No final answer was provided",
+                    reasoning="Missing final answer",
+                    areas_for_improvement=["Provide a final answer"]
+                )
             
             # SELF-REFLECTION: Reflect on failure (if not the last attempt)
             if state.attempt_count < state.max_attempts and not state.is_complete:
                 print("\n🔍 REFLECTOR: Analyzing the failure...")
                 state.current_step = ReflexionStep.REFLECTING
+                
+                # Ensure we have an evaluation to reflect on
+                if not state.current_evaluation:
+                    state.current_evaluation = EvaluationResult(
+                        is_correct=False,
+                        score=0.0,
+                        feedback="No evaluation available",
+                        reasoning="Missing evaluation",
+                        areas_for_improvement=["Generate proper evaluation"]
+                    )
+                
                 state.current_reflection = self.reflector.reflect(
                     task=state.task,
                     reasoning=state.current_reasoning,
@@ -399,7 +539,11 @@ class ReflexionAgent:
                     answer=state.final_answer or "",
                     evaluation=state.current_evaluation
                 )
-                print(f"Key insight: {state.current_reflection.lessons_learned[:150]}...")
+                
+                if state.current_reflection:
+                    print(f"Key insight: {state.current_reflection.lessons_learned[:150]}...")
+                else:
+                    print("⚠️ Reflection generation failed")
                 
                 # Update memory
                 state.current_step = ReflexionStep.MEMORY_UPDATE
