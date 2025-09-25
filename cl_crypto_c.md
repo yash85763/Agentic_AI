@@ -107,3 +107,107 @@ For query: *“Should I stake ETH or provide liquidity to Uniswap?”*
 **Result**: Comprehensive, personalized, accurate response that matches user knowledge level.
 
 Would you like me to dive deeper into any specific agent implementation or help you set up the initial prototype?​​​​​​​​​​​​​​​​
+
+
+
+
+
+
+
+
+---
+---
+---
+
+LangChain’s `RecursiveUrlLoader` might not be extracting content properly. Let’s fix the extractor function:
+
+```python
+def extract_text_with_placeholders(self, html: str) -> str:
+    """Extract text and replace media with placeholders"""
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # Replace media elements BEFORE extracting text
+    for video in soup.find_all('video'):
+        src = video.get('src', '') or video.get('data-src', '')
+        if not src:
+            source = video.find('source')
+            src = source.get('src', '') if source else ''
+        video.replace_with(f"\n[VIDEO_PLACEHOLDER: {src}]\n")
+    
+    for iframe in soup.find_all('iframe'):
+        src = iframe.get('src', '')
+        if any(platform in src.lower() for platform in ['youtube', 'vimeo', 'video', 'embed']):
+            iframe.replace_with(f"\n[EMBEDDED_VIDEO_PLACEHOLDER: {src}]\n")
+    
+    for audio in soup.find_all('audio'):
+        src = audio.get('src', '')
+        if not src:
+            source = audio.find('source')
+            src = source.get('src', '') if source else ''
+        audio.replace_with(f"\n[AUDIO_PLACEHOLDER: {src}]\n")
+    
+    for link in soup.find_all('a', href=True):
+        href = link['href']
+        if href.lower().endswith('.pdf'):
+            text = link.get_text().strip() or 'PDF'
+            link.replace_with(f"\n[PDF_PLACEHOLDER: {text} - {href}]\n")
+    
+    # Remove scripts, styles, and unwanted elements
+    for element in soup(['script', 'style', 'head', 'meta', 'link']):
+        element.decompose()
+    
+    # Get ALL text content
+    text = soup.get_text(separator=' ', strip=True)
+    
+    # Clean up whitespace but keep content
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    content = ' '.join(lines)
+    
+    return content
+```
+
+If this still doesn’t work, try this alternative approach that gets the body content specifically:
+
+```python
+def extract_text_with_placeholders(self, html: str) -> str:
+    """Extract text with better content capture"""
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # Find main content areas (try multiple selectors)
+    main_content = (
+        soup.find('main') or 
+        soup.find('article') or 
+        soup.find('div', class_=lambda x: x and ('content' in x.lower() or 'main' in x.lower())) or
+        soup.find('body')
+    )
+    
+    if not main_content:
+        main_content = soup
+    
+    # Replace media with placeholders
+    for video in main_content.find_all('video'):
+        src = video.get('src', '')
+        video.replace_with(f" [VIDEO_PLACEHOLDER: {src}] ")
+    
+    for audio in main_content.find_all('audio'):
+        src = audio.get('src', '')
+        audio.replace_with(f" [AUDIO_PLACEHOLDER: {src}] ")
+    
+    for link in main_content.find_all('a', href=True):
+        if link['href'].lower().endswith('.pdf'):
+            link.replace_with(f" [PDF_PLACEHOLDER: {link.get_text()}] ")
+    
+    # Remove unwanted elements
+    for element in main_content(['script', 'style', 'nav', 'header', 'footer']):
+        element.decompose()
+    
+    # Extract text
+    text = main_content.get_text(separator=' ')
+    
+    # Clean up
+    text = ' '.join(text.split())  # Normalize whitespace
+    
+    return text
+```
+
+Replace the existing `extract_text_with_placeholders` method in `SimpleLangChainCrawler` with either of these versions.​​​​​​​​​​​​​​​​
