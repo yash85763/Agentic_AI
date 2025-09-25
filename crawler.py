@@ -603,6 +603,82 @@ def flatten_tree(node: PageNode, result: List = None) -> List[PageNode]:
     for child in node.children:
         flatten_tree(child, result)
     return result
+    
+# Add these functions after your main() function
+
+def print_crawl_summary(root: PageNode):
+    """Print a summary of the crawl"""
+    nodes = flatten_tree(root)
+    
+    print("\n" + "="*80)
+    print("CRAWL SUMMARY")
+    print("="*80)
+    print(f"Total pages crawled: {len(nodes)}")
+    print(f"Max depth reached: {max(node.depth for node in nodes)}")
+    
+    # Media summary
+    total_videos = sum(1 for node in nodes for m in node.media_placeholders if 'VIDEO' in m['type'])
+    total_audio = sum(1 for node in nodes for m in node.media_placeholders if 'AUDIO' in m['type'])
+    total_pdfs = sum(1 for node in nodes for m in node.media_placeholders if m['type'] == 'PDF')
+    
+    print(f"\nMedia found:")
+    print(f"  - Videos: {total_videos}")
+    print(f"  - Audio: {total_audio}")
+    print(f"  - PDFs: {total_pdfs}")
+    
+    print("\n" + "-"*80)
+    print("TREE STRUCTURE:")
+    print("-"*80)
+    print_tree_visual(root, "", True)
+    
+    print("\n" + "-"*80)
+    print("ALL PAGES (by depth):")
+    print("-"*80)
+    for node in nodes:
+        print(f"[Depth {node.depth}] {node.url}")
+        print(f"  Title: {node.title}")
+        print(f"  Content length: {node.metadata['content_length']} chars")
+        print(f"  Children: {len(node.children)}, Media: {len(node.media_placeholders)}")
+        print()
+
+def print_tree_visual(node: PageNode, prefix: str = "", is_last: bool = True):
+    """Print tree structure visually"""
+    connector = "└── " if is_last else "├── "
+    print(f"{prefix}{connector}{node.title[:60] or node.url[:60]}")
+    print(f"{prefix}{'    ' if is_last else '│   '}    URL: {node.url}")
+    print(f"{prefix}{'    ' if is_last else '│   '}    Media: {len(node.media_placeholders)}, Children: {len(node.children)}")
+    
+    extension = "    " if is_last else "│   "
+    for i, child in enumerate(node.children):
+        print_tree_visual(child, prefix + extension, i == len(node.children) - 1)
+
+# Update your main() function to use these:
+def main():
+    crawler = EnhancedTreeCrawler(
+        start_url="https://example.com",  # Your URL
+        max_depth=2,
+        same_domain_only=True,
+        max_pages=30,
+        use_selenium=True,
+        headless=True
+    )
+    
+    root = crawler.crawl()
+    
+    if root:
+        # Print summary to console
+        print_crawl_summary(root)
+        
+        # Save files
+        crawler.save_tree(root, "crawled_tree_selenium")
+        
+        print("\n" + "="*80)
+        print("Files saved to: crawled_tree_selenium/")
+        print("  - content_tree.json (full tree structure)")
+        print("  - tree_structure.txt (readable tree)")
+        print("  - content_with_placeholders.txt (all content)")
+        print("  - media_inventory.json (all media items)")
+        print("="*80)
 
 if __name__ == "__main__":
     main()
