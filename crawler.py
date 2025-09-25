@@ -652,6 +652,86 @@ def print_tree_visual(node: PageNode, prefix: str = "", is_last: bool = True):
     for i, child in enumerate(node.children):
         print_tree_visual(child, prefix + extension, i == len(node.children) - 1)
 
+# Add these functions to visualize LangChain crawler results
+
+def print_langchain_summary(docs):
+    """Print summary of LangChain crawl results"""
+    print("\n" + "="*80)
+    print("CRAWL SUMMARY (LangChain)")
+    print("="*80)
+    print(f"Total pages crawled: {len(docs)}")
+    
+    print("\n" + "-"*80)
+    print("PAGES CRAWLED:")
+    print("-"*80)
+    
+    for i, doc in enumerate(docs, 1):
+        url = doc.metadata.get('source', 'Unknown URL')
+        content_preview = doc.page_content[:200].replace('\n', ' ')
+        
+        print(f"\n{i}. {url}")
+        print(f"   Content length: {len(doc.page_content)} chars")
+        print(f"   Preview: {content_preview}...")
+        
+        # Count placeholders
+        video_count = doc.page_content.count('[VIDEO_PLACEHOLDER')
+        audio_count = doc.page_content.count('[AUDIO_PLACEHOLDER')
+        pdf_count = doc.page_content.count('[PDF_PLACEHOLDER')
+        
+        if video_count or audio_count or pdf_count:
+            print(f"   Media: Videos={video_count}, Audio={audio_count}, PDFs={pdf_count}")
+
+def save_langchain_results(docs, output_dir="crawled_langchain"):
+    """Save LangChain results to files"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save as JSON
+    json_data = []
+    for doc in docs:
+        json_data.append({
+            'url': doc.metadata.get('source', ''),
+            'content': doc.page_content,
+            'metadata': doc.metadata
+        })
+    
+    with open(os.path.join(output_dir, 'crawled_pages.json'), 'w', encoding='utf-8') as f:
+        json.dump(json_data, f, indent=2, ensure_ascii=False)
+    
+    # Save as text
+    with open(os.path.join(output_dir, 'all_content.txt'), 'w', encoding='utf-8') as f:
+        for i, doc in enumerate(docs, 1):
+            f.write(f"\n{'='*80}\n")
+            f.write(f"Page {i}: {doc.metadata.get('source', 'Unknown')}\n")
+            f.write(f"{'='*80}\n\n")
+            f.write(doc.page_content)
+            f.write("\n\n")
+    
+    print(f"\nFiles saved to: {output_dir}/")
+    print(f"  - crawled_pages.json")
+    print(f"  - all_content.txt")
+
+# Update your main() to use these:
+def main():
+    print("Using simple LangChain crawler...\n")
+    simple_crawler = SimpleLangChainCrawler(
+        start_url="https://example.com",  # Your URL
+        max_depth=2
+    )
+    
+    docs = simple_crawler.crawl()
+    
+    # Print summary to console
+    print_langchain_summary(docs)
+    
+    # Save to files
+    save_langchain_results(docs, "crawled_langchain")
+    
+    print("\n" + "="*80)
+
+if __name__ == "__main__":
+    main()
+    
+    
 # Update your main() function to use these:
 def main():
     crawler = EnhancedTreeCrawler(
