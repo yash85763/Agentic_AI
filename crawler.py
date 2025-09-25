@@ -1,12 +1,20 @@
-from playwright.async_api import async_playwright, Page, Browser
+from langchain_community.document_loaders import RecursiveUrlLoader
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from typing import Dict, List, Set, Optional
-import asyncio
+import time
 import json
 import os
 from dataclasses import dataclass
-import re
+from collections import deque
 
 @dataclass
 class PageNode:
@@ -31,8 +39,8 @@ class PageNode:
             'children': [child.to_dict() for child in self.children]
         }
 
-class DynamicTreeCrawler:
-    """Enhanced crawler with dropdown handling and media placeholders"""
+class EnhancedTreeCrawler:
+    """Tree crawler with Selenium dropdown handling and media placeholders"""
     
     def __init__(
         self,
@@ -40,21 +48,43 @@ class DynamicTreeCrawler:
         max_depth: int = 3,
         same_domain_only: bool = True,
         max_pages: int = 100,
-        wait_for_dynamic_content: int = 2000  # milliseconds
+        use_selenium: bool = True,
+        headless: bool = True
     ):
         self.start_url = start_url
         self.max_depth = max_depth
         self.same_domain_only = same_domain_only
         self.max_pages = max_pages
-        self.wait_time = wait_for_dynamic_content
+        self.use_selenium = use_selenium
+        self.headless = headless
         self.visited: Set[str] = set()
         self.base_domain = urlparse(start_url).netloc
         
-        # Media file extensions to replace with placeholders
+        # Media file extensions
         self.video_extensions = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv']
         self.audio_extensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac']
         self.pdf_extensions = ['.pdf']
         
+        # Initialize Selenium driver if needed
+        self.driver = None
+        if self.use_selenium:
+            self.driver = self._setup_selenium()
+    
+    def _setup_selenium(self):
+        """Setup Selenium WebDriver"""
+        chrome_options = Options()
+        if self.headless:
+            chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        
+        # Use webdriver_manager to auto-download ChromeDriver
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        return driver
+    
     def is_valid_url(self, url: str) -> bool:
         """Check if URL should be crawled"""
         parsed = urlparse(url)
@@ -70,111 +100,131 @@ class DynamicTreeCrawler:
             self.video_extensions + 
             self.audio_extensions + 
             self.pdf_extensions +
-            ['.jpg', '.jpeg', '.png', '.gif', '.zip', '.exe', '.rar']
+            ['.jpg', '.jpeg', '.png', '.gif', '.zip', '.exe', '.rar', '.doc', '.docx']
         )
         if any(url.lower().endswith(ext) for ext in skip_extensions):
             return False
         
         return True
     
-    async def handle_dropdowns(self, page: Page):
-        """Expand all dropdowns and collapsible elements"""
+    def handle_dropdowns_selenium(self, driver):
+        """Expand dropdowns using Selenium"""
         try:
+            # Scroll to load lazy content
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(0.5)
+            
             # Common dropdown selectors
             dropdown_selectors = [
-                'select',  # Standard select dropdowns
-                '[role="button"][aria-expanded="false"]',  # ARIA dropdowns
-                '.dropdown-toggle',
-                'button[data-toggle="dropdown"]',
-                '.accordion-button.collapsed',  # Bootstrap accordion
-                'details:not([open])',  # HTML5 details element
-                '[class*="dropdown"]:not(.open)',
-                '[class*="collapse"]:not(.show)',
+                "//select",  # Standard select dropdowns
+                "//*[@role='button' and @aria-expanded='false']",  # ARIA dropdowns
+                "//button[contains(@class, 'dropdown')]",
+                "//button[@data-toggle='dropdown']",
+                "//button[contains(@class, 'accordion') and contains(@class, 'collapsed')]",
+                "//details[not(@open)]",  # HTML5 details
+                "//*[contains(@class, 'collapse') and not(contains(@class, 'show'))]",
             ]
             
             for selector in dropdown_selectors:
-                elements = await page.locator(selector).all()
-                for element in elements:
-                    try:
-                        # Try to click to expand
-                        await element.click(timeout=1000)
-                        await page.wait_for_timeout(300)  # Wait for animation
-                    except:
-                        pass
-            
-            # Handle select dropdowns - extract all options
-            selects = await page.locator('select').all()
-            for select in selects:
                 try:
-                    options = await select.locator('option').all()
-                    for option in options:
-                        await option.scroll_into_view_if_needed()
+                    elements = driver.find_elements(By.XPATH, selector)
+                    for element in elements[:10]:  # Limit to avoid too many clicks
+                        try:
+                            # Scroll element into view
+                            driver.execute_script("arguments[0].scrollIntoView(true);", element)
+                            time.sleep(0.2)
+                            
+                            # Try to click
+                            element.click()
+                            time.sleep(0.3)
+                        except:
+                            pass
                 except:
                     pass
             
-            # Scroll to load lazy content
-            await self.scroll_page(page)
+            # Handle select dropdowns specifically
+            try:
+                selects = driver.find_elements(By.TAG_NAME, "select")
+                for select in selects:
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView(true);", select)
+                    except:
+                        pass
+            except:
+                pass
+            
+            # Final scroll to capture everything
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(0.5)
             
         except Exception as e:
             print(f"Error handling dropdowns: {e}")
     
-    async def scroll_page(self, page: Page):
-        """Scroll through page to load lazy content"""
+    def fetch_page_with_selenium(self, url: str) -> Optional[str]:
+        """Fetch page using Selenium with dropdown handling"""
         try:
-            # Get page height
-            height = await page.evaluate('document.body.scrollHeight')
-            viewport_height = await page.evaluate('window.innerHeight')
+            self.driver.get(url)
             
-            # Scroll in steps
-            current = 0
-            while current < height:
-                await page.evaluate(f'window.scrollTo(0, {current})')
-                await page.wait_for_timeout(200)
-                current += viewport_height
+            # Wait for page to load
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            time.sleep(2)  # Wait for dynamic content
             
-            # Scroll back to top
-            await page.evaluate('window.scrollTo(0, 0)')
-            await page.wait_for_timeout(500)
+            # Handle dropdowns
+            self.handle_dropdowns_selenium(self.driver)
+            
+            # Get page source
+            html = self.driver.page_source
+            return html
             
         except Exception as e:
-            print(f"Error scrolling page: {e}")
+            print(f"Error fetching {url} with Selenium: {e}")
+            return None
     
-    def extract_media_placeholders(self, html: str, base_url: str) -> List[Dict]:
+    def extract_media_placeholders(self, html: str, base_url: str) -> tuple[List[Dict], str]:
         """Extract media elements and create placeholders"""
         soup = BeautifulSoup(html, 'html.parser')
         placeholders = []
         
         # Extract videos
-        for video in soup.find_all(['video', 'iframe']):
+        for video in soup.find_all('video'):
             src = video.get('src', '') or video.get('data-src', '')
+            if not src:
+                source = video.find('source')
+                src = source.get('src', '') if source else ''
+            
             if src:
                 full_url = urljoin(base_url, src)
                 placeholder = {
                     'type': 'VIDEO',
                     'src': full_url,
-                    'alt': video.get('title', 'Video content'),
+                    'alt': video.get('title', '') or video.get('aria-label', '') or 'Video content',
                     'attributes': {
                         'width': video.get('width', ''),
                         'height': video.get('height', ''),
-                        'controls': video.get('controls', False)
+                        'controls': video.has_attr('controls')
                     }
                 }
                 placeholders.append(placeholder)
-                # Replace with placeholder text
-                video.replace_with(f"[VIDEO_PLACEHOLDER: {full_url}]")
+                video.replace_with(f"[VIDEO_PLACEHOLDER: {placeholder['alt']} - {full_url}]")
         
-        # Check for embedded video platforms
+        # Extract iframes (embedded videos)
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src', '')
-            if any(platform in src.lower() for platform in ['youtube', 'vimeo', 'dailymotion', 'wistia']):
-                placeholder = {
-                    'type': 'EMBEDDED_VIDEO',
-                    'src': src,
-                    'platform': self._detect_platform(src),
-                    'alt': iframe.get('title', 'Embedded video')
-                }
-                placeholders.append(placeholder)
-                iframe.replace_with(f"[EMBEDDED_VIDEO_PLACEHOLDER: {src}]")
+            if src:
+                video_platforms = ['youtube', 'vimeo', 'dailymotion', 'wistia', 'embed']
+                if any(platform in src.lower() for platform in video_platforms):
+                    placeholder = {
+                        'type': 'EMBEDDED_VIDEO',
+                        'src': src,
+                        'platform': self._detect_platform(src),
+                        'alt': iframe.get('title', '') or 'Embedded video'
+                    }
+                    placeholders.append(placeholder)
+                    iframe.replace_with(f"[EMBEDDED_VIDEO_PLACEHOLDER: {placeholder['platform']} - {src}]")
         
         # Extract audio
         for audio in soup.find_all('audio'):
@@ -188,13 +238,13 @@ class DynamicTreeCrawler:
                 placeholder = {
                     'type': 'AUDIO',
                     'src': full_url,
-                    'alt': audio.get('title', 'Audio content'),
+                    'alt': audio.get('title', '') or 'Audio content',
                     'attributes': {
-                        'controls': audio.get('controls', False)
+                        'controls': audio.has_attr('controls')
                     }
                 }
                 placeholders.append(placeholder)
-                audio.replace_with(f"[AUDIO_PLACEHOLDER: {full_url}]")
+                audio.replace_with(f"[AUDIO_PLACEHOLDER: {placeholder['alt']} - {full_url}]")
         
         # Extract PDF links
         for link in soup.find_all('a', href=True):
@@ -208,9 +258,9 @@ class DynamicTreeCrawler:
                     'filename': os.path.basename(urlparse(full_url).path)
                 }
                 placeholders.append(placeholder)
-                link.replace_with(f"[PDF_PLACEHOLDER: {full_url} - {placeholder['alt']}]")
+                link.replace_with(f"[PDF_PLACEHOLDER: {placeholder['alt']} - {full_url}]")
         
-        # Extract video/audio file links
+        # Extract video file links
         for link in soup.find_all('a', href=True):
             href = link['href']
             if any(href.lower().endswith(ext) for ext in self.video_extensions):
@@ -222,9 +272,12 @@ class DynamicTreeCrawler:
                     'filename': os.path.basename(urlparse(full_url).path)
                 }
                 placeholders.append(placeholder)
-                link.replace_with(f"[VIDEO_FILE_PLACEHOLDER: {full_url}]")
-            
-            elif any(href.lower().endswith(ext) for ext in self.audio_extensions):
+                link.replace_with(f"[VIDEO_FILE_PLACEHOLDER: {placeholder['filename']} - {full_url}]")
+        
+        # Extract audio file links
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if any(href.lower().endswith(ext) for ext in self.audio_extensions):
                 full_url = urljoin(base_url, href)
                 placeholder = {
                     'type': 'AUDIO_FILE',
@@ -233,14 +286,14 @@ class DynamicTreeCrawler:
                     'filename': os.path.basename(urlparse(full_url).path)
                 }
                 placeholders.append(placeholder)
-                link.replace_with(f"[AUDIO_FILE_PLACEHOLDER: {full_url}]")
+                link.replace_with(f"[AUDIO_FILE_PLACEHOLDER: {placeholder['filename']} - {full_url}]")
         
         return placeholders, str(soup)
     
     def _detect_platform(self, url: str) -> str:
         """Detect video platform from URL"""
         url_lower = url.lower()
-        if 'youtube' in url_lower:
+        if 'youtube' in url_lower or 'youtu.be' in url_lower:
             return 'YouTube'
         elif 'vimeo' in url_lower:
             return 'Vimeo'
@@ -277,7 +330,7 @@ class DynamicTreeCrawler:
             title = soup.find('h1').get_text().strip()
         
         # Remove unwanted elements
-        for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside']):
+        for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'noscript']):
             element.decompose()
         
         # Extract text
@@ -288,12 +341,7 @@ class DynamicTreeCrawler:
         
         return title, content
     
-    async def crawl_page(
-        self,
-        browser: Browser,
-        url: str,
-        depth: int
-    ) -> Optional[PageNode]:
+    def crawl_page(self, url: str, depth: int) -> Optional[PageNode]:
         """Crawl a single page and return a PageNode"""
         
         if depth > self.max_depth or len(self.visited) >= self.max_pages:
@@ -306,20 +354,17 @@ class DynamicTreeCrawler:
         self.visited.add(url)
         
         try:
-            # Create new page
-            page = await browser.new_page()
+            # Fetch page
+            if self.use_selenium and self.driver:
+                html = self.fetch_page_with_selenium(url)
+            else:
+                # Fallback to basic fetch (without dropdown handling)
+                import requests
+                response = requests.get(url, timeout=10)
+                html = response.text
             
-            # Navigate to URL
-            await page.goto(url, wait_until='networkidle', timeout=30000)
-            
-            # Wait for dynamic content
-            await page.wait_for_timeout(self.wait_time)
-            
-            # Handle dropdowns and dynamic elements
-            await self.handle_dropdowns(page)
-            
-            # Get final HTML after all interactions
-            html = await page.content()
+            if not html:
+                return None
             
             # Extract media placeholders and clean HTML
             media_placeholders, cleaned_html = self.extract_media_placeholders(html, url)
@@ -327,9 +372,6 @@ class DynamicTreeCrawler:
             # Extract content and links
             title, content = self.extract_content(cleaned_html)
             child_urls = self.extract_links(html, url)
-            
-            # Close page
-            await page.close()
             
             # Create node
             node = PageNode(
@@ -350,7 +392,7 @@ class DynamicTreeCrawler:
             if depth < self.max_depth and len(self.visited) < self.max_pages:
                 for child_url in child_urls[:5]:  # Limit children per page
                     if child_url not in self.visited:
-                        child_node = await self.crawl_page(browser, child_url, depth + 1)
+                        child_node = self.crawl_page(child_url, depth + 1)
                         if child_node:
                             node.children.append(child_node)
             
@@ -360,17 +402,14 @@ class DynamicTreeCrawler:
             print(f"Error crawling {url}: {e}")
             return None
     
-    async def crawl(self) -> Optional[PageNode]:
+    def crawl(self) -> Optional[PageNode]:
         """Start crawling from the root URL"""
-        async with async_playwright() as p:
-            # Launch browser (headless=True for production)
-            browser = await p.chromium.launch(headless=True)
-            
-            try:
-                root = await self.crawl_page(browser, self.start_url, depth=0)
-                return root
-            finally:
-                await browser.close()
+        try:
+            root = self.crawl_page(self.start_url, depth=0)
+            return root
+        finally:
+            if self.driver:
+                self.driver.quit()
     
     def save_tree(self, root: PageNode, output_dir: str = "crawled_tree"):
         """Save the tree structure to files"""
@@ -429,7 +468,7 @@ class DynamicTreeCrawler:
         if node.media_placeholders:
             file.write(f"{' ' * (indent * 2 + 3)}Media items: {len(node.media_placeholders)}\n")
             for media in node.media_placeholders:
-                file.write(f"{' ' * (indent * 2 + 6)}- {media['type']}: {media['src'][:60]}...\n")
+                file.write(f"{' ' * (indent * 2 + 6)}- {media['type']}: {media.get('alt', 'N/A')}\n")
         
         file.write(f"{' ' * (indent * 2 + 3)}Content preview: {node.content[:100]}...\n\n")
         
@@ -460,6 +499,8 @@ class DynamicTreeCrawler:
                 file.write(f"   Source: {media['src']}\n")
                 if 'filename' in media:
                     file.write(f"   Filename: {media['filename']}\n")
+                if 'platform' in media:
+                    file.write(f"   Platform: {media['platform']}\n")
                 file.write("\n")
             file.write("\n")
         
@@ -471,29 +512,88 @@ class DynamicTreeCrawler:
         for child in node.children:
             self._write_content_with_media(file, child, visited_urls)
 
+
+# Alternative: Using LangChain without dropdown handling
+class SimpleLangChainCrawler:
+    """Simpler version using only LangChain (no dropdown handling)"""
+    
+    def __init__(self, start_url: str, max_depth: int = 2):
+        self.start_url = start_url
+        self.max_depth = max_depth
+        self.visited = set()
+    
+    def extract_text_with_placeholders(self, html: str) -> str:
+        """Extract text and replace media with placeholders"""
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Replace media elements
+        for video in soup.find_all(['video', 'iframe']):
+            src = video.get('src', '')
+            video.replace_with(f"[VIDEO_PLACEHOLDER: {src}]")
+        
+        for audio in soup.find_all('audio'):
+            src = audio.get('src', '')
+            audio.replace_with(f"[AUDIO_PLACEHOLDER: {src}]")
+        
+        for link in soup.find_all('a', href=True):
+            if link['href'].lower().endswith('.pdf'):
+                link.replace_with(f"[PDF_PLACEHOLDER: {link.get_text()}]")
+        
+        # Remove scripts and styles
+        for element in soup(['script', 'style']):
+            element.decompose()
+        
+        text = soup.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        return ' '.join(line for line in lines if line)
+    
+    def crawl(self):
+        """Crawl using LangChain"""
+        loader = RecursiveUrlLoader(
+            url=self.start_url,
+            max_depth=self.max_depth,
+            extractor=self.extract_text_with_placeholders,
+            prevent_outside=True
+        )
+        
+        docs = loader.load()
+        return docs
+
+
 # Usage example
-async def main():
-    crawler = DynamicTreeCrawler(
+def main():
+    # Option 1: Full featured with Selenium (handles dropdowns)
+    print("Starting crawl with Selenium (dropdown handling enabled)...\n")
+    crawler = EnhancedTreeCrawler(
         start_url="https://example.com",  # Replace with your URL
         max_depth=2,
         same_domain_only=True,
         max_pages=30,
-        wait_for_dynamic_content=2000  # Wait 2 seconds for dropdowns
+        use_selenium=True,
+        headless=True  # Set to False to see browser
     )
     
-    print("Starting enhanced tree crawl with dropdown handling...")
-    root = await crawler.crawl()
+    root = crawler.crawl()
     
     if root:
         print(f"\nCrawl completed!")
         print(f"Total pages visited: {len(crawler.visited)}")
         
         # Save the tree
-        crawler.save_tree(root, "crawled_tree_enhanced")
+        crawler.save_tree(root, "crawled_tree_selenium")
         
         # Print summary
         media_count = sum(len(node.media_placeholders) for node in flatten_tree(root))
         print(f"Total media items found: {media_count}")
+    
+    # Option 2: Simple LangChain version (no dropdown handling)
+    # print("\nUsing simple LangChain crawler...\n")
+    # simple_crawler = SimpleLangChainCrawler(
+    #     start_url="https://example.com",
+    #     max_depth=2
+    # )
+    # docs = simple_crawler.crawl()
+    # print(f"Crawled {len(docs)} pages")
 
 def flatten_tree(node: PageNode, result: List = None) -> List[PageNode]:
     """Flatten tree to list"""
@@ -505,4 +605,4 @@ def flatten_tree(node: PageNode, result: List = None) -> List[PageNode]:
     return result
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
