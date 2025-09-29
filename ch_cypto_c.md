@@ -1,246 +1,121 @@
-When Agentic RAG actually helps (vs. vanilla RAG)
+Here’s a tight, production-minded recipe for Graph Retrieval and the context-engineering steps you’ll actually ship.
 
-Great fit
-	•	Multi-hop questions: “How does ETH fee burn relate to 2024 L2 fees? cite slides.”
-	•	Ambiguous or sparse queries: agent can reformulate and expand.
-	•	Persona tailoring: agent plans teaching steps (analogy vs. technical).
-	•	Verification/citations: agent runs post-hoc checks before answering.
+Graph retrieval — end-to-end in 8 steps
+	1.	Normalize the graph (during ingestion)
+	•	Nodes: Page, Section, Chunk, Tool, PdfDoc, PdfPage, PdfRegion.
+	•	Edges:
+contains(Page→Section, Section→Chunk, PdfDoc→PdfPage→PdfRegion),
+parent_of(Section→Section),
+links_to(Page→Page) (with anchor_text, position),
+explained_by(Tool→Section|Chunk),
+materialized_from(Chunk→Section|PdfRegion),
+(optional) similar_to (kNN over embeddings for offline shortcuts).
+	•	Stable IDs and rich metadata on chunks: url|pdf_id, heading_path, breadcrumbs, page_no, bbox, content_hash, last_modified.
+	2.	Build indices (multi-index)
+	•	Dense vectors: for chunk.text, heading_path, captions/anchor_texts (store as multi-vector per chunk).
+	•	BM25/keyword: exact terms, codes, SKUs, formulas.
+	•	Graph store: Neo4j / PG + pgvector (or NetworkX if local) with typed edges and edge attributes.
+	•	Fielded filters: template_type, pdf_page, tool_name, version, last_modified.
+	3.	Generate seed candidates (hybrid)
+	•	Query → BM25 + dense over chunk.text (+ separate vectors for headings/anchors).
+	•	Keep top 50–100 seeds (balanced across pages/files).
+	•	If query looks like navigation, upweight heading/anchor fields; if PDF-ish (“page”, “figure”), bias Pdf* nodes.
+	4.	Expand a small subgraph around seeds (rule-based)
+	•	Up: add parents (Chunk→Section→Page / Region→Page→Doc) for orientation & breadcrumbs.
+	•	Side: add siblings under the same parent when headings share terms (e.g., “Limits”, “Exceptions”).
+	•	Down: if question asks for details/examples, pull children (tables, code, figures) of the winning Sections/Pages.
+	•	Cross: follow high-signal links_to edges (anchors matching the query, nav/header links), and explained_by (tools → docs).
+	•	Cap per hop (e.g., 2 hops, fanout ≤ 3–5 per node) so the subgraph stays small & relevant.
+	5.	Score everything (blend graph + text)
+\text{score}(n)=
+0.45\,\text{text\_rel}+0.25\,\text{graph\_prox}+0.15\,\text{anchor\_hit}+0.10\,\text{authority}+0.05\,\text{freshness}
+	•	text_rel: dense + BM25; re-score top 50 with a cross-encoder.
+	•	graph_prox: 1/(1+min hop distance) from any seed; bonus if same Section/Page.
+	•	anchor_hit: match in anchor_text along incoming/outgoing links_to.
+	•	authority: PageRank / menu>body>footer weighting / click logs.
+	•	freshness: last_modified decay.
+	6.	Select & diversify
+	•	Keep 6–12 chunks total; cap at 2 per Section and 3 per Page/File to avoid redundancy.
+	•	Always include the parent Page (or PdfDoc→PdfPage summary) node for context + breadcrumbs.
+	•	If a Tool is in scope, include the doc chunk that defines its logic and (if executed) the tool_result.
+	7.	Context engineering (what you feed the LLM)
+	•	Order: high-score → parent summary → supporting siblings → examples/figures/tables.
+	•	Budget: ~1,500–2,500 tokens of evidence (after truncating long chunks by boundaries).
+	•	Structure: pass a ContextBundle (not raw text) to your answerer:
 
-Avoid / constrain
-	•	Ultra-simple lookups (“What is halving?”) → agent detours add latency/cost.
-	•	Noisy corpora without slide/page structure → tool use won’t fix bad data.
-	•	Hard realtime news (outside your corpus) → keep agent from webbrowsing unless you intend to.
+{
+  "query": "How do pro-tier fees work?",
+  "persona": {"role":"Support Pro","tone":"concise"},
+  "summaries": [
+    {"node":"page:/pricing","breadcrumbs":"Home>Pricing","gist":"Explains fee tiers and formula"}
+  ],
+  "evidence": [
+    {"S":"S1","chunk_id":"web:...","url":"https://site/pricing#fee-formula","heading_path":["Pricing","Fee formula"],"text":"Fee = base + rate × amount ...","offsets":[1024,1188]},
+    {"S":"S2","chunk_id":"pdf:...","pdf":{"file_id":"whitepaper_v3.pdf","page":3,"bbox":[92,140,510,280]},"text":"Pro rate is 1.8% and base $2.00"}
+  ],
+  "tool_plan": null
+}
 
-Agentic RAG design (graph of skills)
 
-Nodes (skills)
-	1.	Persona Router → set style/depth.
-	2.	Planner → break query into sub-goals (e.g., define → compare → risks → cite).
-	3.	Retriever (hybrid+rerank) → k=50 union → cross-encoder → top8.
-	4.	Query Refiner (optional loop) → rewrite if coverage is weak.
-	5.	Composer → draft answer using persona style + citations.
-	6.	Verifier → claim-to-evidence check; hallucination guard.
-	7.	Citations Builder → normalize Deck • Slide and add “as-of” date.
-	8.	Safety/Compliance → disclaimers, remove advicey phrasing.
-	9.	Finalizer → TL;DR, Key Takeaways, Sources.
+	•	Prompt contract: require the model to attach [S#] after each factual sentence and emit a citations[] map (chunk_id→url/pdf.page+bbox). If a sentence can’t be grounded, it must say “not found” or ask to run a tool.
 
-State
-```python
-class State(TypedDict):
-    persona: Literal["p1","p2","p3"]
-    query: str
-    subgoals: list[str]
-    retrieved: list[dict]     # {text, doc_id, slide_no, date, score}
-    draft: str
-    citations: list[dict]     # {doc_id, slide_no, date}
-    safety_flags: list[str]
-    needs_refine: bool
-```
-
-Prompts (core snippets)
-
-Planner (few-shot)
-
-Task: Turn the user question and persona into 2–4 subgoals. Prefer “Define → Explain → Risks → Cite”. Return JSON list only. Keep persona depth/jargon in mind.
-
-Composer (system)
-
-You are a crypto explainer that must only use the provided context. Tailor tone and depth using persona:\n{{persona_json}}. Respond with: TL;DR (2–4 lines) → Main Answer (persona style) → Key Takeaways (3 bullets) → Sources (Deck • Slide, with dates). Add “Not financial advice.” If evidence is thin, say so.
-
-Verifier (judge)
-
-Check if each key claim is supported by cited chunks. Flag any unsupported sentence, stale date (>18 months), or numeric inconsistency. Return JSON: {ok: bool, issues: [..], missing_citations: [..]}.
-
-Skeleton code (LangGraph)
-
-```python
-# pyproject: langgraph, langchain-openai, qdrant-client (or pgvector), fastapi
-
-from typing import TypedDict, Literal, List, Dict, Any
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from qdrant_client import QdrantClient
-
-### ---- STATE ----
-class State(TypedDict):
-    persona: Literal["p1","p2","p3"]
-    query: str
-    subgoals: List[str]
-    retrieved: List[Dict[str, Any]]
-    draft: str
-    citations: List[Dict[str, Any]]
-    safety_flags: List[str]
-    needs_refine: bool
-
-### ---- MODELS & STORES ----
-llm = ChatOpenAI(model="gpt-4o-mini")
-judge = ChatOpenAI(model="gpt-4o-mini")   # lean judge; can swap in larger
-emb = OpenAIEmbeddings(model="text-embedding-3-large")
-qdrant = QdrantClient(url="http://localhost:6333")
-
-### ---- HELPERS ----
-def hybrid_retrieve(query: str, k: int = 8) -> List[Dict[str, Any]]:
-    # 1) vector search
-    vec = emb.embed_query(query)
-    vhits = qdrant.search(collection_name="crypto_docs", query_vector=vec, limit=40)
-    # 2) keyword/BM25 (optional: via OpenSearch) → khits
-    # 3) union + cross-encoder reranker (pseudo)
-    # return top-8 dicts with {text, doc_id, slide_no, date, score}
-    return postprocess_hits(vhits)[:k]
-
-def build_context(chunks: List[Dict[str, Any]]) -> str:
-    # Concatenate with minimal extra tokens; include slide/page headers
-    parts = []
-    for c in chunks:
-        parts.append(f"[{c['doc_id']} • Slide {c['slide_no']} • {c['date']}]\n{c['text']}")
-    return "\n\n".join(parts)
-
-def citation_scan(answer: str) -> List[Dict[str, Any]]:
-    # naive: parse (Doc • Slide N) patterns → normalize via store metadata
-    return extract_citations(answer)
-
-### ---- NODES ----
-def persona_router(state: State) -> State:
-    # assume persona already set in config; default to p2
-    state.setdefault("persona", "p2")
-    return state
-
-def planner(state: State) -> State:
-    prompt = f"""User question: {state['query']}
-Persona: {state['persona']}
-Return 2-4 subgoals as a JSON list."""
-    goals = llm.invoke([{"role": "user", "content": prompt}]).content
-    state["subgoals"] = parse_json_list(goals)
-    return state
-
-def retriever(state: State) -> State:
-    # join original query + subgoals keywords
-    expanded = state["query"] + " | " + " | ".join(state.get("subgoals", []))
-    hits = hybrid_retrieve(expanded, k=8)
-    state["retrieved"] = hits
-    # if few or low score, trigger refine
-    state["needs_refine"] = len(hits) < 3
-    return state
-
-def refiner(state: State) -> State:
-    if not state["needs_refine"]:
-        return state
-    q = state["query"]
-    hint = "Rewrite to be unambiguous and include key entities; 12-18 tokens."
-    newq = llm.invoke([{"role":"user","content": f"{hint}\n\nOriginal: {q}"}]).content
-    hits = hybrid_retrieve(newq, k=8)
-    state["retrieved"] = hits or state["retrieved"]
-    state["needs_refine"] = False
-    return state
-
-def composer(state: State) -> State:
-    persona_json = get_persona_json(state["persona"])
-    context = build_context(state["retrieved"])
-    prompt = f"""System: You must only use the context. Tailor to persona.
-Persona: {persona_json}
-
-Context:
-{context}
-
-Write: TL;DR → Main Answer → 3 Key Takeaways → Sources (Deck • Slide). Add 'Not financial advice.'"""
-    out = llm.invoke([{"role":"user","content": prompt}]).content
-    state["draft"] = out
-    state["citations"] = citation_scan(out)
-    return state
-
-def verifier(state: State) -> State:
-    context = build_context(state["retrieved"])
-    ask = f"""Given the CONTEXT and the DRAFT, check support for each claim.
-Return JSON: {{ "ok": bool, "issues": [..], "missing_citations": [..], "stale": [..] }}.
-CONTEXT:\n{context}\n\nDRAFT:\n{state['draft']}"""
-    res = judge.invoke([{"role":"user","content": ask}]).content
-    verdict = parse_json(res)
-    if not verdict.get("ok"):
-        # soft fix: append "What we know" section + inject missing citations where possible
-        state["draft"] = patch_answer(state["draft"], verdict, state["retrieved"])
-        state["safety_flags"] = verdict.get("issues", [])
-    return state
-
-def finalizer(state: State) -> State:
-    # ensure as-of newest date & disclaimer
-    newest = max([c["date"] for c in state["retrieved"] if c.get("date")], default=None)
-    footer = f"\n\n— Not financial advice. Sources as of {newest}."
-    state["draft"] = state["draft"].rstrip() + footer
-    return state
-
-### ---- GRAPH ----
-graph = StateGraph(State)
-graph.add_node("persona", persona_router)
-graph.add_node("plan", planner)
-graph.add_node("retrieve", retriever)
-graph.add_node("refine", refiner)
-graph.add_node("compose", composer)
-graph.add_node("verify", verifier)
-graph.add_node("final", finalizer)
-
-graph.set_entry_point("persona")
-graph.add_edge("persona", "plan")
-graph.add_edge("plan", "retrieve")
-graph.add_edge("retrieve", "refine")
-graph.add_edge("refine", "compose")
-graph.add_edge("compose", "verify")
-graph.add_edge("verify", "final")
-graph.add_edge("final", END)
-
-app = graph.compile(checkpointer=MemorySaver())
-
-# ---- RUNTIME EXAMPLE ----
-def answer(query: str, persona: str = "p2"):
-    state: State = {"query": query, "persona": persona,
-                    "subgoals": [], "retrieved": [], "draft": "",
-                    "citations": [], "safety_flags": [], "needs_refine": False}
-    result = app.invoke(state, config={"configurable": {"thread_id": "demo"}})
-    return result["draft"]
-```
-
-Minimal alternative (no LangGraph, plain Python)
-
-```python
-def agentic_rag(query, persona):
-    state = {"query": query, "persona": persona}
-    state["subgoals"] = plan(query, persona)
-    hits = hybrid_retrieve(query + " | " + " | ".join(state["subgoals"]))
-    if len(hits) < 3:
-        query2 = refine_query(query)
-        hits2 = hybrid_retrieve(query2)
-        if hits2: hits = hits2
-    draft = compose(hits, persona, query, state["subgoals"])
-    verdict = verify(draft, hits)
-    if not verdict["ok"]:
-        draft = patch_answer(draft, verdict, hits)
-    return add_footer(draft, hits)
-```
-
-Measuring “applicability” (is Agentic worth it?)
-
-Design an A/B test
-	•	A (baseline RAG): retrieve → compose → return.
-	•	B (Agentic): plan → retrieve → refine loop (≤1) → compose → verify → return.
-
-Metrics
-	•	Faithfulness (LLM-judge rubric 0–5)
-	•	Citation accuracy (slide exact-match, page overlap)
-	•	Persona satisfaction (thumbs-up rate per persona)
-	•	Coverage rate (% answers with ≥2 independent sources)
-	•	Latency & cost deltas (p50/p95, tokens)
-	•	Escapes to “insufficient evidence” (should go up slightly but correlate with fewer hallucinations)
-
-Acceptance
-	•	+0.5 ↑ faithfulness & +10–15% ↑ citation accuracy at ≤35% cost ↑ and ≤1.0s latency ↑ (p50).
-	•	If gains <5% or p95 latency hurts UX, restrict Agentic path to only multi-hop intents.
-
-Practical knobs (keep it efficient)
-	•	Refine loop cap: 1 iteration max.
-	•	Top-k: 50 union → rerank to 8.
-	•	Verifier: smaller model; only full check if answer > 180 tokens or multiple numeric claims.
-	•	Caching: memoize subgoal plans for common queries; cache rerank results by n-grams.
-	•	Safety: block wallet/private-key operational steps; always “Not financial advice.”
+	8.	Verification & learning
+	•	Verifier (LLM-as-judge) aligns each sentence → one S#; ungrounded sentences are dropped or revised.
+	•	Log which chunks won, user clicks on citations, and missed queries → feed back into hard negative mining and weight tuning.
 
 ⸻
 
+Minimal retriever pseudocode (graph-aware)
+
+def graph_retrieve(query, k=10):
+    # 1) seeds
+    seeds = hybrid_search(query, fields=["text","headings","anchors"], topk=80)
+    seeds = cross_encode_rerank(query, seeds, topk=50)
+
+    # 2) expand
+    subgraph = set(seeds)
+    for s in seeds[:30]:
+        subgraph |= parents(s, up_to=2)                 # chunk->section->page/doc
+        subgraph |= siblings(s, limit=3, match=query)   # same parent
+        subgraph |= children(s, limit=3)                # tables/figures/code
+        for p in pages_or_docs(s):
+            subgraph |= links_to_high_signal(p, query, limit=3)
+            subgraph |= explained_by_tools_near(p, limit=2)
+
+    # 3) score
+    scored = []
+    for n in subgraph:
+        tr = text_rel(query, n)             # dense+bm25 or cross-enc for top N
+        gp = graph_proximity(n, seeds)
+        ah = anchor_signal(n, query)
+        au = authority(n)
+        fr = freshness(n)
+        score = 0.45*tr + 0.25*gp + 0.15*ah + 0.10*au + 0.05*fr
+        scored.append((score, n))
+
+    # 4) diversify & pack
+    top_nodes = diversify(scored, by=["section","page","pdf_file"], limit= k + 4)
+    evidence = materialize_chunks(top_nodes, cap_per_section=2, cap_per_page=3, k=k)
+    bundle = build_context_bundle(query, evidence)  # includes summaries/breadcrumbs
+    return bundle
+
+
+⸻
+
+Context-engineering checklist (graph case)
+	•	Chunking discipline: don’t cross H2 for HTML; use page/region for PDFs; store heading_path, breadcrumbs, page_no, bbox, ocr_conf.
+	•	Metadata for citations: url with #fragment or pdf_id+page+bbox; also keep offsets to render snippet tooltips.
+	•	Packing rules: include at least one overview chunk (parent Page/Doc) + 1–2 definition chunks + a few example/edge case chunks.
+	•	Persona hooks: prepend a 1–2 line persona card (tone/format), not the whole history; keep it separate from evidence.
+	•	Safety hooks: ingress filter (policy/risk); tool input validation (if tools are executed).
+	•	Fallbacks: if graph expansion is too sparse, fall back to plain hybrid; if too dense, restrict to same parent Section and top 1 hop.
+
+⸻
+
+What makes graph retrieval “feel smart”
+	•	It keeps structure: parents/siblings provide definitions + examples naturally.
+	•	It navigates: links_to with anchor text brings the canonical explainer page.
+	•	It grounds PDFs: region-level chunks let you cite page+bbox.
+	•	It stays fresh: last_modified + recrawl hashes bias new/changed nodes.
+
+If you want, I can wire this into your current “Supervisor → Retriever Agent → Response Agent” stack with a tiny FastAPI endpoint that returns the ContextBundle above and a cross-encoder reranker stub you can swap for your favorite model.
