@@ -1,6 +1,30 @@
 """
 Complete GraphRAG Implementation with Custom LLM
 Processes text documents, builds knowledge graph, and enables querying
+
+SETUP INSTRUCTIONS FOR YOUR SDK:
+================================
+1. Install the SDK: pip install my-sdk
+
+2. In CustomLLMAdapter.__init__() (around line 50):
+   Uncomment:
+   from my-sdk import MyLLMClient
+   self.client = MyLLMClient(api_key=config.api_key, ...)
+
+3. In CustomLLMAdapter._call_llm() (around line 65):
+   Uncomment the block:
+   response = self.client.chat.create(
+       model=self.config.model_name,
+       messages=messages,
+       temperature=...,
+       max_tokens=...,
+       n=1
+   )
+   return response.get("choices")[0].get("text")
+
+4. Update config in main() with your API key and model name
+
+5. Run: python script.py
 """
 
 import os
@@ -39,47 +63,66 @@ class LLMConfig:
 class CustomLLMAdapter:
     """
     Adapter for your custom LLM SDK.
-    
-    INSTRUCTIONS TO ADAPT:
-    1. Import your SDK: from your_sdk import YourLLMClient
-    2. Initialize in __init__: self.client = YourLLMClient(...)
-    3. Modify _call_llm() to use your SDK's API
+    Configured to work with your specific SDK pattern.
     """
     
     def __init__(self, config: LLMConfig):
         self.config = config
         
-        # TODO: Replace this with your actual SDK initialization
-        # Example:
-        # from your_sdk import YourLLMClient
-        # self.client = YourLLMClient(
+        # Import and initialize your SDK
+        # Uncomment and modify the import line below:
+        # from my-sdk import MyLLMClient
+        
+        # Initialize your client
+        # self.client = MyLLMClient(
         #     api_key=config.api_key,
-        #     base_url=config.base_url
+        #     # Add any other parameters your SDK needs
         # )
+        
+        # FOR TESTING: Comment out this placeholder once you add your SDK
+        self.client = None  # Replace with actual client initialization
         
         logger.info(f"Initialized LLM: {config.model_name}")
     
     async def _call_llm(self, prompt: str, system_prompt: str = "", **kwargs) -> str:
         """
-        Call your custom LLM SDK.
-        
-        TODO: Replace this method with your actual SDK call.
-        
-        Example for most SDKs:
-        response = await self.client.generate(
-            model=self.config.model_name,
-            prompt=prompt,
-            system=system_prompt,
-            temperature=kwargs.get('temperature', self.config.temperature),
-            max_tokens=kwargs.get('max_tokens', self.config.max_tokens)
-        )
-        return response.text  # or however your SDK returns the text
+        Call your custom LLM SDK using your exact pattern.
         """
         
-        # PLACEHOLDER: This simulates an LLM response for testing
-        # Replace this entire block with your SDK call
-        await asyncio.sleep(0.5)  # Simulate API call
+        # Build messages in the format your SDK expects
+        messages = []
         
+        # Add system message if provided
+        if system_prompt:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        
+        # Add user message
+        messages.append({
+            "role": "user",
+            "content": prompt
+        })
+        
+        # Call your SDK with the exact pattern you provided
+        # Uncomment this block once you initialize self.client:
+        """
+        response = self.client.chat.create(
+            model=self.config.model_name,
+            messages=messages,
+            temperature=kwargs.get('temperature', self.config.temperature),
+            max_tokens=kwargs.get('max_tokens', self.config.max_tokens),
+            n=1,  # Number of completions
+            # Add any other parameters your SDK supports
+        )
+        
+        # Extract text using your exact response pattern
+        return response.get("choices")[0].get("text")
+        """
+        
+        # PLACEHOLDER FOR TESTING - Remove this when you add your SDK
+        await asyncio.sleep(0.5)
         if "extract entities" in prompt.lower():
             return json.dumps([
                 {"name": "GraphRAG", "type": "TECHNOLOGY", "description": "Knowledge graph RAG system"},
@@ -91,7 +134,7 @@ class CustomLLMAdapter:
                  "description": "GraphRAG is implemented using Python"}
             ])
         else:
-            return "This is a placeholder response. Replace _call_llm() with your SDK."
+            return "This is a placeholder response. Uncomment the SDK call above."
     
     async def generate(self, prompt: str, system_prompt: str = "", **kwargs) -> str:
         """Generate response from LLM."""
@@ -655,15 +698,24 @@ async def main():
     
     # Step 1: Configure your LLM
     print("\n[1] Configuring LLM...")
+    
+    # TODO: Update these with your actual values
     config = LLMConfig(
-        api_key="your-api-key-here",  # Replace with your API key
-        model_name="your-model-name",  # Replace with your model name
-        base_url="https://your-api-endpoint.com",  # Optional: your API endpoint
+        api_key="your-api-key-here",  # Your actual API key
+        model_name="your-model-name",  # e.g., "gpt-4", "claude-3", etc.
+        base_url=None,  # Optional: your API endpoint if needed
         temperature=0.7,
         max_tokens=3000
     )
     
+    # Initialize the LLM adapter with your SDK
     llm_adapter = CustomLLMAdapter(config)
+    
+    # NOTE: Before running, uncomment the SDK initialization in CustomLLMAdapter.__init__()
+    # and the client.chat.create() call in CustomLLMAdapter._call_llm()
+    
+    print("\n⚠️  IMPORTANT: Make sure to uncomment the SDK code in CustomLLMAdapter class!")
+    print("   Look for the comments marked with 'Uncomment' in the code.\n")
     
     # Step 2: Load documents
     print("\n[2] Loading documents...")
