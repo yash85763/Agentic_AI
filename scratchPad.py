@@ -1,856 +1,736 @@
 """
-Complete GraphRAG Implementation with Custom LLM
-Processes text documents, builds knowledge graph, and enables querying
+Microsoft GraphRAG Implementation with Custom LLM/Embeddings
+Uses the official graphrag library with your custom SDK for both LLM and embeddings
 
-SETUP INSTRUCTIONS FOR YOUR SDK:
-================================
-1. Install the SDK: pip install my-sdk
+Installation:
+pip install graphrag numpy pandas tiktoken
 
-2. In CustomLLMAdapter.__init__() (around line 50):
-   Uncomment:
-   from my-sdk import MyLLMClient
-   self.client = MyLLMClient(api_key=config.api_key, ...)
-
-3. In CustomLLMAdapter._call_llm() (around line 65):
-   Uncomment the block:
-   response = self.client.chat.create(
-       model=self.config.model_name,
-       messages=messages,
-       temperature=...,
-       max_tokens=...,
-       n=1
-   )
-   return response.get("choices")[0].get("text")
-
-4. Update config in main() with your API key and model name
-
-5. Run: python script.py
+Setup:
+1. Uncomment the SDK import and initialization in CustomLLMClient
+2. Add your API key and model names in main()
+3. Put your .txt files in ./documents folder
+4. Run: python script.py
 """
 
 import os
-import json
-import re
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass, asdict
-from pathlib import Path
 import asyncio
-from collections import defaultdict
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 import logging
 
-# Install these if needed: pip install networkx pandas numpy
-import networkx as nx
+# GraphRAG imports
+from graphrag.llm.base import BaseLLM
+from graphrag.llm.types import (
+    LLM,
+    CompletionInput,
+    CompletionOutput,
+    LLMInput,
+    LLMOutput,
+)
+from graphrag.config import (
+    GraphRagConfig,
+    LLMConfig as GraphRagLLMConfig,
+    EmbeddingConfig,
+    ChunkingConfig,
+    EntityExtractionConfig,
+    ClaimExtractionConfig,
+    CommunityReportsConfig,
+    SummarizationConfig,
+)
+from graphrag.index import create_pipeline_config
+from graphrag.index.run import run_pipeline_with_config
+from graphrag.query.context_builder.entity_extraction import EntityVectorStoreKey
+from graphrag.query.llm.oai.typing import OpenaiApiType
+from graphrag.query.structured_search.global_search.search import GlobalSearch
+from graphrag.query.structured_search.local_search.search import LocalSearch
+from graphrag.query.input.loaders.dfs import store_entity_semantic_embeddings
+from graphrag.vector_stores.lancedb import LanceDBVectorStore
+
 import pandas as pd
 import numpy as np
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
 # ==================== CUSTOM LLM WRAPPER ====================
 
-@dataclass
-class LLMConfig:
-    """Configuration for your custom LLM"""
-    api_key: str
-    model_name: str
-    base_url: Optional[str] = None
-    temperature: float = 0.7
-    max_tokens: int = 4000
-    timeout: int = 120
-
-
-class CustomLLMAdapter:
+class CustomLLMClient(BaseLLM):
     """
-    Adapter for your custom LLM SDK.
-    Configured to work with your specific SDK pattern.
+    Custom LLM wrapper that implements GraphRAG's BaseLLM interface.
+    Integrates your SDK's client.chat.create() pattern.
     """
     
-    def __init__(self, config: LLMConfig):
-        self.config = config
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        api_base: Optional[str] = None,
+        api_version: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4000,
+        **kwargs
+    ):
+        """
+        Initialize custom LLM client.
         
-        # Import and initialize your SDK
-        # Uncomment and modify the import line below:
+        Args:
+            api_key: Your API key
+            model: Model name
+            api_base: Optional API base URL
+            temperature: Generation temperature
+            max_tokens: Max tokens to generate
+        """
+        self.api_key = api_key
+        self.model = model
+        self.api_base = api_base
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
+        # TODO: Uncomment and configure your SDK
         # from my-sdk import MyLLMClient
-        
-        # Initialize your client
         # self.client = MyLLMClient(
-        #     api_key=config.api_key,
-        #     # Add any other parameters your SDK needs
+        #     api_key=api_key,
+        #     # Add other initialization parameters
         # )
         
-        # FOR TESTING: Comment out this placeholder once you add your SDK
-        self.client = None  # Replace with actual client initialization
+        # PLACEHOLDER: Remove when adding your SDK
+        self.client = None
         
-        logger.info(f"Initialized LLM: {config.model_name}")
+        logger.info(f"Initialized Custom LLM: {model}")
     
-    async def _call_llm(self, prompt: str, system_prompt: str = "", **kwargs) -> str:
+    async def _execute_llm(
+        self,
+        prompt: str,
+        **kwargs
+    ) -> str:
         """
-        Call your custom LLM SDK using your exact pattern.
+        Execute LLM call using your SDK pattern.
         """
-        
         # Build messages in the format your SDK expects
-        messages = []
+        messages = [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
         
-        # Add system message if provided
-        if system_prompt:
-            messages.append({
-                "role": "system",
-                "content": system_prompt
-            })
-        
-        # Add user message
-        messages.append({
-            "role": "user",
-            "content": prompt
-        })
-        
-        # Call your SDK with the exact pattern you provided
-        # Uncomment this block once you initialize self.client:
+        # TODO: Uncomment when you add your SDK
         """
         response = self.client.chat.create(
-            model=self.config.model_name,
+            model=self.model,
             messages=messages,
-            temperature=kwargs.get('temperature', self.config.temperature),
-            max_tokens=kwargs.get('max_tokens', self.config.max_tokens),
-            n=1,  # Number of completions
-            # Add any other parameters your SDK supports
+            temperature=kwargs.get('temperature', self.temperature),
+            max_tokens=kwargs.get('max_tokens', self.max_tokens),
+            n=1,
         )
         
-        # Extract text using your exact response pattern
         return response.get("choices")[0].get("text")
         """
         
-        # PLACEHOLDER FOR TESTING - Remove this when you add your SDK
-        await asyncio.sleep(0.5)
-        if "extract entities" in prompt.lower():
-            return json.dumps([
-                {"name": "GraphRAG", "type": "TECHNOLOGY", "description": "Knowledge graph RAG system"},
-                {"name": "Python", "type": "TECHNOLOGY", "description": "Programming language"},
-            ])
-        elif "extract relationships" in prompt.lower():
-            return json.dumps([
-                {"source": "GraphRAG", "target": "Python", "relationship": "IMPLEMENTED_IN", 
-                 "description": "GraphRAG is implemented using Python"}
-            ])
-        else:
-            return "This is a placeholder response. Uncomment the SDK call above."
+        # PLACEHOLDER: Remove this when adding real SDK
+        await asyncio.sleep(0.1)
+        return f"Placeholder response for: {prompt[:50]}..."
     
-    async def generate(self, prompt: str, system_prompt: str = "", **kwargs) -> str:
-        """Generate response from LLM."""
-        try:
-            response = await self._call_llm(prompt, system_prompt, **kwargs)
-            return response
-        except Exception as e:
-            logger.error(f"LLM generation error: {e}")
-            raise
-    
-    def generate_sync(self, prompt: str, system_prompt: str = "", **kwargs) -> str:
-        """Synchronous wrapper for generate."""
-        return asyncio.run(self.generate(prompt, system_prompt, **kwargs))
-
-
-# ==================== DATA MODELS ====================
-
-@dataclass
-class Entity:
-    """Represents an entity in the knowledge graph."""
-    name: str
-    type: str
-    description: str
-    source_doc: str
-    mentions: int = 1
-    
-    def __hash__(self):
-        return hash(self.name.lower())
-    
-    def __eq__(self, other):
-        return self.name.lower() == other.name.lower()
-
-
-@dataclass
-class Relationship:
-    """Represents a relationship between entities."""
-    source: str
-    target: str
-    relationship: str
-    description: str
-    source_doc: str
-    weight: float = 1.0
-
-
-# ==================== DOCUMENT PROCESSOR ====================
-
-class DocumentLoader:
-    """Loads and processes text documents."""
-    
-    @staticmethod
-    def load_documents(directory: str) -> List[Dict[str, str]]:
+    async def agenerate(
+        self,
+        messages: List[Dict[str, str]],
+        streaming: bool = False,
+        **kwargs
+    ) -> LLMOutput:
         """
-        Load all .txt files from directory.
+        GraphRAG calls this method for text generation.
+        Converts messages to prompt and calls your SDK.
+        """
+        # Convert messages to single prompt
+        prompt = "\n\n".join([
+            f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}"
+            for msg in messages
+        ])
+        
+        # Call your LLM
+        response_text = await self._execute_llm(prompt, **kwargs)
+        
+        # Return in GraphRAG expected format
+        return LLMOutput(
+            output=response_text,
+            json=None
+        )
+    
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        streaming: bool = False,
+        **kwargs
+    ) -> LLMOutput:
+        """Synchronous version of agenerate."""
+        return asyncio.run(self.agenerate(messages, streaming, **kwargs))
+    
+    async def agenerate_completion(
+        self,
+        prompt: str,
+        **kwargs
+    ) -> CompletionOutput:
+        """Generate completion from prompt."""
+        response_text = await self._execute_llm(prompt, **kwargs)
+        return CompletionOutput(output=response_text)
+    
+    def generate_completion(
+        self,
+        prompt: str,
+        **kwargs
+    ) -> CompletionOutput:
+        """Synchronous completion generation."""
+        return asyncio.run(self.agenerate_completion(prompt, **kwargs))
+
+
+# ==================== CUSTOM EMBEDDINGS WRAPPER ====================
+
+class CustomEmbeddingsClient:
+    """
+    Custom embeddings wrapper using your LLM SDK.
+    Many LLM APIs also provide embedding endpoints.
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        api_base: Optional[str] = None,
+        **kwargs
+    ):
+        """
+        Initialize custom embeddings client.
         
         Args:
-            directory: Path to directory containing .txt files
+            api_key: Your API key
+            model: Embedding model name (e.g., "text-embedding-ada-002")
+            api_base: Optional API base URL
+        """
+        self.api_key = api_key
+        self.model = model
+        self.api_base = api_base
+        
+        # TODO: Uncomment and configure your SDK
+        # from my-sdk import MyLLMClient
+        # self.client = MyLLMClient(
+        #     api_key=api_key,
+        #     # Add other initialization parameters
+        # )
+        
+        # PLACEHOLDER
+        self.client = None
+        
+        logger.info(f"Initialized Custom Embeddings: {model}")
+    
+    async def aembed(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for texts using your SDK.
+        
+        Args:
+            texts: List of texts to embed
             
         Returns:
-            List of dicts with 'filename', 'content', and 'path'
+            List of embedding vectors
+        """
+        # TODO: Uncomment when you add your SDK
+        # If your SDK has an embeddings endpoint:
+        """
+        response = self.client.embeddings.create(
+            model=self.model,
+            input=texts
+        )
+        
+        # Extract embeddings (adjust based on your SDK's response format)
+        embeddings = [item.get("embedding") for item in response.get("data", [])]
+        return embeddings
+        """
+        
+        # PLACEHOLDER: Returns random embeddings for testing
+        # Remove this when adding real SDK
+        await asyncio.sleep(0.05)
+        embedding_dim = 1536  # Standard dimension
+        return [np.random.randn(embedding_dim).tolist() for _ in texts]
+    
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """Synchronous version of aembed."""
+        return asyncio.run(self.aembed(texts))
+
+
+# ==================== GRAPHRAG CONFIGURATION ====================
+
+def create_graphrag_config(
+    llm_client: CustomLLMClient,
+    embeddings_client: CustomEmbeddingsClient,
+    root_dir: str
+) -> GraphRagConfig:
+    """
+    Create GraphRAG configuration using custom LLM and embeddings.
+    
+    Args:
+        llm_client: Your custom LLM client
+        embeddings_client: Your custom embeddings client
+        root_dir: Root directory for GraphRAG data
+        
+    Returns:
+        GraphRagConfig object
+    """
+    
+    config = GraphRagConfig(
+        root_dir=root_dir,
+        
+        # LLM Configuration - uses your custom client
+        llm=GraphRagLLMConfig(
+            api_key=llm_client.api_key,
+            type="openai_chat",  # GraphRAG expects OpenAI-compatible format
+            model=llm_client.model,
+            api_base=llm_client.api_base,
+            temperature=llm_client.temperature,
+            max_tokens=llm_client.max_tokens,
+        ),
+        
+        # Embeddings Configuration - uses your custom client
+        embeddings=EmbeddingConfig(
+            api_key=embeddings_client.api_key,
+            type="openai_embedding",
+            model=embeddings_client.model,
+            api_base=embeddings_client.api_base,
+        ),
+        
+        # Chunking configuration
+        chunks=ChunkingConfig(
+            size=1200,
+            overlap=100,
+            group_by_columns=["id"],
+        ),
+        
+        # Entity extraction - uses GraphRAG's tested prompts
+        entity_extraction=EntityExtractionConfig(
+            enabled=True,
+            max_gleanings=1,  # Number of times to refine extraction
+        ),
+        
+        # Community reports
+        community_reports=CommunityReportsConfig(
+            enabled=True,
+            max_length=2000,
+        ),
+        
+        # Summarization
+        summarize_descriptions=SummarizationConfig(
+            enabled=True,
+            max_length=500,
+        ),
+    )
+    
+    return config
+
+
+# ==================== DOCUMENT PROCESSING ====================
+
+class GraphRAGPipeline:
+    """
+    Main pipeline for GraphRAG with custom LLM.
+    """
+    
+    def __init__(
+        self,
+        llm_client: CustomLLMClient,
+        embeddings_client: CustomEmbeddingsClient,
+        root_dir: str = "./graphrag_output"
+    ):
+        """
+        Initialize GraphRAG pipeline.
+        
+        Args:
+            llm_client: Custom LLM client
+            embeddings_client: Custom embeddings client
+            root_dir: Output directory for GraphRAG artifacts
+        """
+        self.llm_client = llm_client
+        self.embeddings_client = embeddings_client
+        self.root_dir = root_dir
+        self.config = create_graphrag_config(llm_client, embeddings_client, root_dir)
+        
+        # Create directories
+        os.makedirs(root_dir, exist_ok=True)
+        os.makedirs(f"{root_dir}/input", exist_ok=True)
+        os.makedirs(f"{root_dir}/output", exist_ok=True)
+        
+        logger.info(f"GraphRAG pipeline initialized at: {root_dir}")
+    
+    def load_documents(self, documents_dir: str) -> List[Dict[str, str]]:
+        """
+        Load documents from directory.
+        
+        Args:
+            documents_dir: Directory containing .txt files
+            
+        Returns:
+            List of document dictionaries
         """
         documents = []
-        doc_path = Path(directory)
+        doc_path = Path(documents_dir)
         
         if not doc_path.exists():
-            logger.error(f"Directory not found: {directory}")
+            logger.error(f"Directory not found: {documents_dir}")
             return documents
         
         txt_files = list(doc_path.glob("*.txt"))
         logger.info(f"Found {len(txt_files)} text files")
         
-        for filepath in txt_files:
+        for idx, filepath in enumerate(txt_files):
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     if content:
-                        documents.append({
-                            'filename': filepath.name,
-                            'content': content,
-                            'path': str(filepath)
-                        })
+                        # GraphRAG expects documents in specific format
+                        doc = {
+                            'id': f"doc_{idx}",
+                            'text': content,
+                            'title': filepath.stem,
+                        }
+                        documents.append(doc)
                         logger.info(f"Loaded: {filepath.name} ({len(content)} chars)")
             except Exception as e:
                 logger.error(f"Error loading {filepath}: {e}")
         
         return documents
     
-    @staticmethod
-    def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-        """Split text into overlapping chunks."""
-        words = text.split()
-        chunks = []
-        
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = ' '.join(words[i:i + chunk_size])
-            if chunk:
-                chunks.append(chunk)
-        
-        return chunks
-
-
-# ==================== GRAPH RAG CORE ====================
-
-class GraphRAGEngine:
-    """Main GraphRAG engine for building and querying knowledge graphs."""
-    
-    def __init__(self, llm_adapter: CustomLLMAdapter):
-        self.llm = llm_adapter
-        self.graph = nx.DiGraph()
-        self.entities: Dict[str, Entity] = {}
-        self.relationships: List[Relationship] = []
-        self.documents: List[Dict] = []
-        
-    async def build_graph_from_documents(self, documents: List[Dict[str, str]]) -> None:
+    async def index_documents(self, documents: List[Dict[str, str]]):
         """
-        Build knowledge graph from documents.
+        Index documents using GraphRAG.
+        This builds the knowledge graph with entities and relationships.
         
         Args:
-            documents: List of document dicts with 'content' and 'filename'
+            documents: List of document dictionaries
         """
-        logger.info(f"Building graph from {len(documents)} documents...")
-        self.documents = documents
+        logger.info(f"Starting GraphRAG indexing for {len(documents)} documents...")
         
-        for idx, doc in enumerate(documents):
-            logger.info(f"Processing [{idx+1}/{len(documents)}]: {doc['filename']}")
-            
-            # Chunk large documents
-            content = doc['content']
-            if len(content) > 2000:
-                chunks = DocumentLoader.chunk_text(content, chunk_size=1500, overlap=300)
-                logger.info(f"  Split into {len(chunks)} chunks")
-            else:
-                chunks = [content]
-            
-            # Process each chunk
-            for chunk_idx, chunk in enumerate(chunks):
-                logger.info(f"  Processing chunk {chunk_idx+1}/{len(chunks)}")
-                
-                # Extract entities
-                entities = await self._extract_entities(chunk, doc['filename'])
-                logger.info(f"    Found {len(entities)} entities")
-                
-                # Extract relationships
-                relationships = await self._extract_relationships(
-                    chunk, entities, doc['filename']
-                )
-                logger.info(f"    Found {len(relationships)} relationships")
-                
-                # Add to graph
-                self._add_to_graph(entities, relationships)
+        # Save documents to input directory in GraphRAG format
+        input_dir = f"{self.root_dir}/input"
         
-        logger.info(f"Graph built: {len(self.entities)} entities, "
-                   f"{len(self.relationships)} relationships")
-        logger.info(f"Graph stats: {self.graph.number_of_nodes()} nodes, "
-                   f"{self.graph.number_of_edges()} edges")
-    
-    async def _extract_entities(self, text: str, source_doc: str) -> List[Entity]:
-        """Extract entities using LLM."""
+        # Create a CSV file with documents (GraphRAG expects CSV)
+        df = pd.DataFrame(documents)
+        input_file = f"{input_dir}/documents.csv"
+        df.to_csv(input_file, index=False)
+        logger.info(f"Documents saved to: {input_file}")
         
-        prompt = f"""Extract all important entities from the text below.
-
-For each entity, provide:
-- name: The entity name (be specific and use full names)
-- type: Entity type (choose from: PERSON, ORGANIZATION, LOCATION, TECHNOLOGY, CONCEPT, EVENT, PRODUCT, OTHER)
-- description: Brief description (1-2 sentences)
-
-Text:
-{text}
-
-Return ONLY a valid JSON array with no additional text. Format:
-[
-  {{"name": "Entity Name", "type": "TYPE", "description": "Description here"}},
-  ...
-]
-"""
+        # Create pipeline configuration
+        pipeline_config = create_pipeline_config(self.config)
         
-        system_prompt = "You are an expert at extracting structured information. Return only valid JSON."
+        # Inject custom LLM and embeddings into the pipeline
+        # This ensures GraphRAG uses YOUR clients for all operations
+        pipeline_config['llm'] = self.llm_client
+        pipeline_config['embeddings'] = self.embeddings_client
         
         try:
-            response = await self.llm.generate(prompt, system_prompt)
-            entities_data = self._parse_json_response(response)
+            # Run the GraphRAG indexing pipeline
+            # This will:
+            # 1. Extract entities using your LLM (with GraphRAG's prompts)
+            # 2. Extract relationships using your LLM
+            # 3. Build communities
+            # 4. Generate embeddings using your embeddings client
+            # 5. Create the knowledge graph
             
-            entities = []
-            for item in entities_data:
-                if all(k in item for k in ['name', 'type', 'description']):
-                    entity = Entity(
-                        name=item['name'].strip(),
-                        type=item['type'].strip().upper(),
-                        description=item['description'].strip(),
-                        source_doc=source_doc
-                    )
-                    entities.append(entity)
+            logger.info("Running GraphRAG pipeline (this may take several minutes)...")
+            await run_pipeline_with_config(pipeline_config)
             
-            return entities
-        
+            logger.info("GraphRAG indexing complete!")
+            logger.info(f"Artifacts saved to: {self.root_dir}/output")
+            
         except Exception as e:
-            logger.error(f"Entity extraction error: {e}")
-            return []
+            logger.error(f"Error during indexing: {e}")
+            raise
     
-    async def _extract_relationships(
-        self, 
-        text: str, 
-        entities: List[Entity],
-        source_doc: str
-    ) -> List[Relationship]:
-        """Extract relationships between entities using LLM."""
-        
-        if len(entities) < 2:
-            return []
-        
-        entity_list = [f"- {e.name} ({e.type})" for e in entities[:20]]  # Limit to 20
-        entity_names = "\n".join(entity_list)
-        
-        prompt = f"""Given these entities:
-{entity_names}
-
-Find relationships between them in the text below.
-
-For each relationship provide:
-- source: Source entity name (must match an entity from the list)
-- target: Target entity name (must match an entity from the list)
-- relationship: Relationship type (e.g., WORKS_FOR, LOCATED_IN, PART_OF, CREATED_BY, USES, RELATED_TO)
-- description: Brief description of the relationship
-
-Text:
-{text}
-
-Return ONLY a valid JSON array with no additional text. Format:
-[
-  {{"source": "Entity1", "target": "Entity2", "relationship": "RELATIONSHIP_TYPE", "description": "Description"}},
-  ...
-]
-"""
-        
-        system_prompt = "You are an expert at extracting relationships. Return only valid JSON."
-        
-        try:
-            response = await self.llm.generate(prompt, system_prompt)
-            rels_data = self._parse_json_response(response)
-            
-            relationships = []
-            entity_names_set = {e.name.lower() for e in entities}
-            
-            for item in rels_data:
-                if all(k in item for k in ['source', 'target', 'relationship', 'description']):
-                    # Validate entities exist
-                    source = item['source'].strip()
-                    target = item['target'].strip()
-                    
-                    if (source.lower() in entity_names_set and 
-                        target.lower() in entity_names_set):
-                        rel = Relationship(
-                            source=source,
-                            target=target,
-                            relationship=item['relationship'].strip().upper(),
-                            description=item['description'].strip(),
-                            source_doc=source_doc
-                        )
-                        relationships.append(rel)
-            
-            return relationships
-        
-        except Exception as e:
-            logger.error(f"Relationship extraction error: {e}")
-            return []
-    
-    def _parse_json_response(self, response: str) -> List[Dict]:
-        """Parse JSON from LLM response, handling common formatting issues."""
-        try:
-            # Try direct parsing
-            return json.loads(response)
-        except json.JSONDecodeError:
-            # Try to extract JSON array from response
-            json_match = re.search(r'\[.*\]', response, re.DOTALL)
-            if json_match:
-                try:
-                    return json.loads(json_match.group())
-                except json.JSONDecodeError:
-                    pass
-            
-            logger.warning("Could not parse JSON response")
-            return []
-    
-    def _add_to_graph(self, entities: List[Entity], relationships: List[Relationship]):
-        """Add entities and relationships to the graph."""
-        
-        # Add/update entities
-        for entity in entities:
-            entity_key = entity.name.lower()
-            if entity_key in self.entities:
-                # Entity exists, increment mentions
-                self.entities[entity_key].mentions += 1
-            else:
-                # New entity
-                self.entities[entity_key] = entity
-                self.graph.add_node(
-                    entity.name,
-                    type=entity.type,
-                    description=entity.description,
-                    mentions=entity.mentions
-                )
-        
-        # Add relationships
-        for rel in relationships:
-            self.relationships.append(rel)
-            
-            # Add edge to graph
-            if self.graph.has_node(rel.source) and self.graph.has_node(rel.target):
-                if self.graph.has_edge(rel.source, rel.target):
-                    # Edge exists, increase weight
-                    self.graph[rel.source][rel.target]['weight'] += 1
-                else:
-                    # New edge
-                    self.graph.add_edge(
-                        rel.source,
-                        rel.target,
-                        relationship=rel.relationship,
-                        description=rel.description,
-                        weight=rel.weight
-                    )
-    
-    async def query(self, question: str, top_k: int = 10) -> Tuple[str, Dict[str, Any]]:
+    def load_graph_data(self) -> Dict[str, pd.DataFrame]:
         """
-        Query the knowledge graph.
+        Load the generated graph data.
+        
+        Returns:
+            Dictionary of DataFrames with entities, relationships, etc.
+        """
+        output_dir = f"{self.root_dir}/output"
+        
+        data = {}
+        
+        # Load entities
+        entities_file = f"{output_dir}/create_final_entities.parquet"
+        if os.path.exists(entities_file):
+            data['entities'] = pd.read_parquet(entities_file)
+            logger.info(f"Loaded {len(data['entities'])} entities")
+        
+        # Load relationships
+        relationships_file = f"{output_dir}/create_final_relationships.parquet"
+        if os.path.exists(relationships_file):
+            data['relationships'] = pd.read_parquet(relationships_file)
+            logger.info(f"Loaded {len(data['relationships'])} relationships")
+        
+        # Load communities
+        communities_file = f"{output_dir}/create_final_communities.parquet"
+        if os.path.exists(communities_file):
+            data['communities'] = pd.read_parquet(communities_file)
+            logger.info(f"Loaded {len(data['communities'])} communities")
+        
+        # Load community reports
+        reports_file = f"{output_dir}/create_final_community_reports.parquet"
+        if os.path.exists(reports_file):
+            data['reports'] = pd.read_parquet(reports_file)
+            logger.info(f"Loaded {len(data['reports'])} community reports")
+        
+        return data
+    
+    async def query_global(self, question: str) -> str:
+        """
+        Perform global search query.
+        Good for questions about overall themes and trends.
         
         Args:
             question: User's question
-            top_k: Number of relevant context items to retrieve
             
         Returns:
-            Tuple of (answer, context_info)
+            Answer string
         """
-        logger.info(f"Query: {question}")
+        logger.info(f"Global query: {question}")
         
-        # Step 1: Extract key entities/concepts from question
-        query_entities = await self._extract_query_entities(question)
-        logger.info(f"Query entities: {query_entities}")
+        # Load graph data
+        data = self.load_graph_data()
         
-        # Step 2: Retrieve relevant subgraph
-        context, context_info = self._retrieve_subgraph(query_entities, top_k)
-        logger.info(f"Retrieved context: {len(context_info['entities'])} entities, "
-                   f"{len(context_info['relationships'])} relationships")
+        if 'reports' not in data:
+            return "Graph not indexed yet. Please run index_documents first."
         
-        # Step 3: Generate answer
-        answer = await self._generate_answer(question, context)
+        # Initialize global search
+        search = GlobalSearch(
+            llm=self.llm_client,
+            context_builder_params={
+                "data": data['reports'],
+            }
+        )
         
-        return answer, context_info
+        # Execute search
+        result = await search.asearch(question)
+        
+        return result.response
     
-    async def _extract_query_entities(self, question: str) -> List[str]:
-        """Extract key entities/concepts from the question."""
+    async def query_local(self, question: str) -> str:
+        """
+        Perform local search query.
+        Good for specific questions about entities.
         
-        prompt = f"""Extract key entities, concepts, or topics from this question that would be relevant for searching a knowledge graph.
-
-Question: {question}
-
-Return ONLY a JSON array of strings (entity names), no additional text:
-["entity1", "entity2", ...]
-"""
+        Args:
+            question: User's question
+            
+        Returns:
+            Answer string
+        """
+        logger.info(f"Local query: {question}")
         
-        try:
-            response = await self.llm.generate(prompt)
-            entities = self._parse_json_response(response)
-            if isinstance(entities, list):
-                return [str(e).strip() for e in entities if e]
-            return []
-        except Exception as e:
-            logger.error(f"Query entity extraction error: {e}")
-            # Fallback: extract capitalized words
-            return [word for word in question.split() if word and word[0].isupper()]
+        # Load graph data
+        data = self.load_graph_data()
+        
+        if 'entities' not in data:
+            return "Graph not indexed yet. Please run index_documents first."
+        
+        # Initialize local search
+        search = LocalSearch(
+            llm=self.llm_client,
+            context_builder_params={
+                "entities": data['entities'],
+                "relationships": data.get('relationships'),
+                "reports": data.get('reports'),
+            }
+        )
+        
+        # Execute search
+        result = await search.asearch(question)
+        
+        return result.response
     
-    def _retrieve_subgraph(
-        self, 
-        query_entities: List[str], 
-        top_k: int
-    ) -> Tuple[str, Dict[str, Any]]:
-        """Retrieve relevant subgraph based on query entities."""
+    def print_statistics(self):
+        """Print statistics about the knowledge graph."""
+        data = self.load_graph_data()
         
-        relevant_nodes = set()
-        relevant_edges = []
+        print("\n" + "="*80)
+        print("KNOWLEDGE GRAPH STATISTICS")
+        print("="*80)
         
-        # Find matching nodes (case-insensitive)
-        query_lower = [q.lower() for q in query_entities]
-        for node in self.graph.nodes():
-            node_lower = node.lower()
-            # Check if any query entity is in node name or vice versa
-            if any(q in node_lower or node_lower in q for q in query_lower):
-                relevant_nodes.add(node)
+        if 'entities' in data:
+            print(f"\n📊 Total Entities: {len(data['entities'])}")
+            if 'type' in data['entities'].columns:
+                print("\nEntity Types:")
+                type_counts = data['entities']['type'].value_counts()
+                for entity_type, count in type_counts.items():
+                    print(f"  - {entity_type}: {count}")
         
-        # If no direct matches, use most mentioned entities
-        if not relevant_nodes:
-            sorted_entities = sorted(
-                self.entities.values(),
-                key=lambda x: x.mentions,
-                reverse=True
-            )
-            relevant_nodes = {e.name for e in sorted_entities[:top_k]}
+        if 'relationships' in data:
+            print(f"\n🔗 Total Relationships: {len(data['relationships'])}")
+            if 'type' in data['relationships'].columns:
+                print("\nRelationship Types:")
+                rel_counts = data['relationships']['type'].value_counts().head(10)
+                for rel_type, count in rel_counts.items():
+                    print(f"  - {rel_type}: {count}")
         
-        # Expand to neighbors
-        expanded_nodes = set(relevant_nodes)
-        for node in relevant_nodes:
-            if self.graph.has_node(node):
-                neighbors = list(self.graph.neighbors(node))
-                predecessors = list(self.graph.predecessors(node))
-                expanded_nodes.update(neighbors[:3])  # Add top 3 neighbors
-                expanded_nodes.update(predecessors[:3])
+        if 'communities' in data:
+            print(f"\n👥 Total Communities: {len(data['communities'])}")
         
-        # Limit total nodes
-        final_nodes = list(expanded_nodes)[:top_k]
+        if 'reports' in data:
+            print(f"\n📄 Community Reports: {len(data['reports'])}")
         
-        # Get relationships between these nodes
-        for source in final_nodes:
-            for target in final_nodes:
-                if self.graph.has_edge(source, target):
-                    edge_data = self.graph[source][target]
-                    relevant_edges.append({
-                        'source': source,
-                        'target': target,
-                        'relationship': edge_data.get('relationship', 'RELATED_TO'),
-                        'description': edge_data.get('description', '')
-                    })
-        
-        # Format context
-        context_parts = []
-        
-        # Add entity information
-        context_parts.append("=== ENTITIES ===")
-        for node in final_nodes:
-            if self.graph.has_node(node):
-                node_data = self.graph.nodes[node]
-                context_parts.append(
-                    f"- {node} ({node_data.get('type', 'UNKNOWN')}): "
-                    f"{node_data.get('description', 'No description')}"
-                )
-        
-        # Add relationships
-        if relevant_edges:
-            context_parts.append("\n=== RELATIONSHIPS ===")
-            for edge in relevant_edges[:top_k]:
-                context_parts.append(
-                    f"- {edge['source']} --[{edge['relationship']}]--> {edge['target']}: "
-                    f"{edge['description']}"
-                )
-        
-        context = "\n".join(context_parts)
-        
-        context_info = {
-            'entities': final_nodes,
-            'relationships': relevant_edges,
-            'entity_count': len(final_nodes),
-            'relationship_count': len(relevant_edges)
-        }
-        
-        return context, context_info
-    
-    async def _generate_answer(self, question: str, context: str) -> str:
-        """Generate answer using retrieved context."""
-        
-        prompt = f"""Answer the question based ONLY on the provided knowledge graph context. Be specific and detailed.
-
-{context}
-
-Question: {question}
-
-Instructions:
-- Use only information from the context above
-- If the context doesn't contain enough information, say so
-- Be concise but complete
-- Cite specific entities and relationships when possible
-
-Answer:"""
-        
-        system_prompt = "You are a helpful assistant that answers questions based on knowledge graph context."
-        
-        try:
-            answer = await self.llm.generate(prompt, system_prompt, temperature=0.3)
-            return answer.strip()
-        except Exception as e:
-            logger.error(f"Answer generation error: {e}")
-            return "Error generating answer."
-    
-    def save_graph(self, filepath: str):
-        """Save graph to file."""
-        data = {
-            'entities': [asdict(e) for e in self.entities.values()],
-            'relationships': [asdict(r) for r in self.relationships]
-        }
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
-        logger.info(f"Graph saved to {filepath}")
-    
-    def load_graph(self, filepath: str):
-        """Load graph from file."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        
-        # Reconstruct entities and relationships
-        for e_dict in data['entities']:
-            entity = Entity(**e_dict)
-            self.entities[entity.name.lower()] = entity
-            self.graph.add_node(
-                entity.name,
-                type=entity.type,
-                description=entity.description,
-                mentions=entity.mentions
-            )
-        
-        for r_dict in data['relationships']:
-            rel = Relationship(**r_dict)
-            self.relationships.append(rel)
-            if self.graph.has_node(rel.source) and self.graph.has_node(rel.target):
-                self.graph.add_edge(
-                    rel.source,
-                    rel.target,
-                    relationship=rel.relationship,
-                    description=rel.description,
-                    weight=rel.weight
-                )
-        
-        logger.info(f"Graph loaded from {filepath}")
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get graph statistics."""
-        stats = {
-            'total_entities': len(self.entities),
-            'total_relationships': len(self.relationships),
-            'graph_nodes': self.graph.number_of_nodes(),
-            'graph_edges': self.graph.number_of_edges(),
-            'entity_types': {},
-            'relationship_types': {},
-            'most_connected_entities': []
-        }
-        
-        # Entity types
-        for entity in self.entities.values():
-            stats['entity_types'][entity.type] = stats['entity_types'].get(entity.type, 0) + 1
-        
-        # Relationship types
-        for rel in self.relationships:
-            stats['relationship_types'][rel.relationship] = \
-                stats['relationship_types'].get(rel.relationship, 0) + 1
-        
-        # Most connected entities
-        if self.graph.number_of_nodes() > 0:
-            degree_centrality = nx.degree_centrality(self.graph)
-            top_entities = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)[:10]
-            stats['most_connected_entities'] = [
-                {'entity': name, 'connections': round(score * 100, 2)}
-                for name, score in top_entities
-            ]
-        
-        return stats
+        print("="*80 + "\n")
 
 
 # ==================== MAIN APPLICATION ====================
 
 async def main():
-    """Main application to test GraphRAG."""
+    """Main application."""
     
-    print("=" * 80)
-    print("GraphRAG System - Document Processing and Query")
-    print("=" * 80)
+    print("="*80)
+    print("Microsoft GraphRAG with Custom LLM Integration")
+    print("="*80)
     
-    # Step 1: Configure your LLM
-    print("\n[1] Configuring LLM...")
+    # Step 1: Configure your custom LLM
+    print("\n[1] Initializing Custom LLM...")
     
-    # TODO: Update these with your actual values
-    config = LLMConfig(
-        api_key="your-api-key-here",  # Your actual API key
-        model_name="your-model-name",  # e.g., "gpt-4", "claude-3", etc.
-        base_url=None,  # Optional: your API endpoint if needed
-        temperature=0.7,
-        max_tokens=3000
+    # TODO: Update with your actual credentials
+    llm_client = CustomLLMClient(
+        api_key="your-api-key-here",
+        model="your-llm-model-name",  # e.g., "gpt-4", "claude-3-opus"
+        api_base=None,  # Optional: your API endpoint
+        temperature=0.0,  # Lower for factual extraction
+        max_tokens=4000,
     )
     
-    # Initialize the LLM adapter with your SDK
-    llm_adapter = CustomLLMAdapter(config)
+    # Step 2: Configure your custom embeddings
+    print("[2] Initializing Custom Embeddings...")
     
-    # NOTE: Before running, uncomment the SDK initialization in CustomLLMAdapter.__init__()
-    # and the client.chat.create() call in CustomLLMAdapter._call_llm()
+    embeddings_client = CustomEmbeddingsClient(
+        api_key="your-api-key-here",
+        model="your-embedding-model",  # e.g., "text-embedding-ada-002"
+        api_base=None,
+    )
     
-    print("\n⚠️  IMPORTANT: Make sure to uncomment the SDK code in CustomLLMAdapter class!")
-    print("   Look for the comments marked with 'Uncomment' in the code.\n")
+    # Step 3: Initialize GraphRAG pipeline
+    print("[3] Initializing GraphRAG Pipeline...")
     
-    # Step 2: Load documents
-    print("\n[2] Loading documents...")
-    documents_dir = "./documents"  # Directory containing your .txt files
+    pipeline = GraphRAGPipeline(
+        llm_client=llm_client,
+        embeddings_client=embeddings_client,
+        root_dir="./graphrag_output"
+    )
     
-    # Create example documents if directory doesn't exist
+    # Step 4: Load documents
+    print("\n[4] Loading Documents...")
+    documents_dir = "./documents"
+    
+    # Create sample documents if directory doesn't exist
     if not os.path.exists(documents_dir):
         os.makedirs(documents_dir)
         print(f"Created directory: {documents_dir}")
-        print("Please add your .txt files to this directory and run again.")
         
-        # Create sample documents for testing
+        # Create sample documents
         sample_docs = {
-            "graphrag_intro.txt": """GraphRAG is an advanced retrieval-augmented generation technique developed by Microsoft Research. 
-It combines knowledge graphs with large language models to improve information retrieval and question answering.
-GraphRAG was created by the Microsoft Research team to address limitations in traditional RAG systems.
-The system works by extracting entities and relationships from documents to build a knowledge graph.
-This knowledge graph enables more sophisticated queries and better context understanding.""",
+            "ai_research.txt": """Microsoft Research developed GraphRAG as an advanced retrieval-augmented generation system. 
+The project combines knowledge graphs with large language models to improve information retrieval.
+GraphRAG uses entity extraction and relationship mapping to build structured representations of documents.
+The system was designed to handle complex queries that require understanding of multiple interconnected concepts.""",
             
-            "python_ml.txt": """Python is a popular programming language widely used in machine learning and data science.
-TensorFlow and PyTorch are two major deep learning frameworks built with Python.
-Guido van Rossum created Python in 1991 at Centrum Wiskunde & Informatica in the Netherlands.
-Python's simplicity and extensive libraries make it ideal for artificial intelligence research.
-Many tech companies including Google, Facebook, and OpenAI use Python for their ML systems.""",
+            "tech_companies.txt": """OpenAI created GPT models and ChatGPT, revolutionizing natural language processing.
+Microsoft partnered with OpenAI and invested billions to integrate AI into their products.
+Google developed LaMDA and Bard, competing in the conversational AI space.
+Anthropic, founded by former OpenAI researchers, created Claude AI with a focus on safety.
+These companies are driving innovation in large language model development.""",
             
-            "ai_companies.txt": """OpenAI is an AI research company that created ChatGPT and GPT models.
-Microsoft invested heavily in OpenAI and integrated GPT models into their products.
-Google DeepMind, formed by merging Google Brain and DeepMind, focuses on AI safety research.
-Anthropic, founded by former OpenAI researchers, developed Claude AI assistant.
-These companies are leading the development of large language models and artificial general intelligence."""
+            "python_ecosystem.txt": """Python is widely used for machine learning and data science applications.
+PyTorch and TensorFlow are the dominant deep learning frameworks in the Python ecosystem.
+NumPy and Pandas provide essential tools for numerical computing and data manipulation.
+Hugging Face transformed NLP by providing easy access to pre-trained models through Python.
+The Python community continues to develop tools that make AI more accessible."""
         }
         
         for filename, content in sample_docs.items():
             with open(os.path.join(documents_dir, filename), 'w') as f:
                 f.write(content)
-        print(f"Created {len(sample_docs)} sample documents for testing.")
+        print(f"Created {len(sample_docs)} sample documents")
     
-    documents = DocumentLoader.load_documents(documents_dir)
+    documents = pipeline.load_documents(documents_dir)
     
     if not documents:
-        print("No documents found. Please add .txt files to the documents directory.")
+        print("No documents found. Add .txt files to the documents directory.")
         return
     
-    print(f"Loaded {len(documents)} documents")
+    # Step 5: Index documents with GraphRAG
+    print(f"\n[5] Building Knowledge Graph with GraphRAG...")
+    print("⚠️  This uses GraphRAG's built-in prompts for entity/relationship extraction")
+    print("⚠️  Make sure you've uncommented the SDK code in Custom classes!\n")
     
-    # Step 3: Build knowledge graph
-    print("\n[3] Building knowledge graph...")
-    engine = GraphRAGEngine(llm_adapter)
-    await engine.build_graph_from_documents(documents)
+    await pipeline.index_documents(documents)
     
-    # Step 4: Display statistics
-    print("\n[4] Graph Statistics:")
-    stats = engine.get_statistics()
-    print(f"  Total Entities: {stats['total_entities']}")
-    print(f"  Total Relationships: {stats['total_relationships']}")
-    print(f"  Graph Nodes: {stats['graph_nodes']}")
-    print(f"  Graph Edges: {stats['graph_edges']}")
+    # Step 6: Display statistics
+    print("\n[6] Knowledge Graph Statistics:")
+    pipeline.print_statistics()
     
-    print(f"\n  Entity Types:")
-    for etype, count in sorted(stats['entity_types'].items(), key=lambda x: x[1], reverse=True):
-        print(f"    - {etype}: {count}")
-    
-    print(f"\n  Relationship Types:")
-    for rtype, count in sorted(stats['relationship_types'].items(), key=lambda x: x[1], reverse=True):
-        print(f"    - {rtype}: {count}")
-    
-    if stats['most_connected_entities']:
-        print(f"\n  Most Connected Entities:")
-        for item in stats['most_connected_entities'][:5]:
-            print(f"    - {item['entity']}: {item['connections']}%")
-    
-    # Step 5: Save graph
-    graph_file = "knowledge_graph.json"
-    engine.save_graph(graph_file)
-    print(f"\n[5] Knowledge graph saved to: {graph_file}")
-    
-    # Step 6: Test queries
-    print("\n[6] Testing GraphRAG with sample queries...")
-    print("=" * 80)
+    # Step 7: Test queries
+    print("\n[7] Testing Queries...")
+    print("="*80)
     
     test_questions = [
-        "What is GraphRAG and how does it work?",
-        "Which companies are involved in AI research?",
-        "What is the relationship between Microsoft and OpenAI?",
-        "Who created Python and when?",
-        "What are the main AI frameworks used in Python?"
+        ("What is GraphRAG and how does it work?", "global"),
+        ("Which companies are developing AI models?", "global"),
+        ("What is the relationship between Microsoft and OpenAI?", "local"),
+        ("What frameworks are used for deep learning in Python?", "local"),
     ]
     
-    for i, question in enumerate(test_questions, 1):
+    for idx, (question, search_type) in enumerate(test_questions, 1):
         print(f"\n{'='*80}")
-        print(f"Query {i}: {question}")
+        print(f"Query {idx} ({search_type.upper()} SEARCH): {question}")
         print(f"{'='*80}")
         
-        answer, context_info = await engine.query(question, top_k=8)
+        try:
+            if search_type == "global":
+                answer = await pipeline.query_global(question)
+            else:
+                answer = await pipeline.query_local(question)
+            
+            print(f"\nAnswer:\n{answer}")
+        except Exception as e:
+            print(f"Error: {e}")
         
-        print(f"\nContext Retrieved:")
-        print(f"  - Entities: {context_info['entity_count']}")
-        print(f"  - Relationships: {context_info['relationship_count']}")
-        
-        print(f"\nAnswer:")
-        print(f"{answer}")
-        
-        print(f"\nRelevant Entities: {', '.join(context_info['entities'][:5])}")
-        
-        # Small delay between queries
         await asyncio.sleep(1)
     
-    # Step 7: Interactive mode
-    print("\n" + "=" * 80)
-    print("Interactive Query Mode (type 'exit' to quit, 'stats' for statistics)")
-    print("=" * 80)
+    # Step 8: Interactive mode
+    print("\n" + "="*80)
+    print("Interactive Query Mode")
+    print("Commands: 'global:<question>' or 'local:<question>' or 'stats' or 'exit'")
+    print("="*80)
     
     while True:
         try:
-            user_question = input("\nYour question: ").strip()
+            user_input = input("\nYour query: ").strip()
             
-            if user_question.lower() in ['exit', 'quit', 'q']:
+            if user_input.lower() in ['exit', 'quit', 'q']:
                 print("Goodbye!")
                 break
             
-            if user_question.lower() == 'stats':
-                stats = engine.get_statistics()
-                print(json.dumps(stats, indent=2))
+            if user_input.lower() == 'stats':
+                pipeline.print_statistics()
                 continue
             
-            if not user_question:
+            if not user_input:
                 continue
             
-            answer, context_info = await engine.query(user_question, top_k=10)
+            # Parse search type
+            if user_input.startswith('global:'):
+                question = user_input[7:].strip()
+                answer = await pipeline.query_global(question)
+            elif user_input.startswith('local:'):
+                question = user_input[6:].strip()
+                answer = await pipeline.query_local(question)
+            else:
+                # Default to global search
+                answer = await pipeline.query_global(user_input)
             
-            print(f"\n--- Answer ---")
-            print(answer)
-            print(f"\n--- Context Used ---")
-            print(f"Entities: {', '.join(context_info['entities'][:8])}")
-            print(f"Relationships: {context_info['relationship_count']}")
+            print(f"\n--- Answer ---\n{answer}")
             
         except KeyboardInterrupt:
             print("\nGoodbye!")
@@ -860,7 +740,10 @@ These companies are leading the development of large language models and artific
 
 
 if __name__ == "__main__":
-    print("\nIMPORTANT: Replace the _call_llm() method in CustomLLMAdapter")
-    print("with your actual LLM SDK implementation.\n")
+    print("\n⚠️  SETUP REQUIRED:")
+    print("1. Install: pip install graphrag numpy pandas tiktoken")
+    print("2. Uncomment SDK code in CustomLLMClient and CustomEmbeddingsClient")
+    print("3. Update API keys in main()")
+    print("4. Add .txt files to ./documents folder\n")
     
     asyncio.run(main())
