@@ -452,3 +452,228 @@ if __name__ == "__main__":
 ⸻
 
 if you want, I can add the pgvector “upsert” function next (with SQLAlchemy), or slot these into your build_index.py pipeline you already have.
+
+
+```python
+# pg_vector_store.py
+
+# psycopg + pgvector upsert / schema helpers
+from __future__ import annotations
+from typing import Iterable, List, Dict, Any, Optional, Sequence, Tuple
+import os
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
+from psycopg import sql
+from .embed import EmbeddingRecord
+
+DEFAULT_DIM = int(os.getenv("EMBED_DIM", "3072"))
+
+def dsn_from_env() -> str:
+    host = os.getenv("PG_HOST", "localhost")
+    port = os.getenv("PG_PORT", "5432")
+    db   = os.getenv("PG_DB",   "invest_chat")
+    usr  = os.getenv("PG_USER", "postgres")
+    pwd  = os.getenv("PG_PASSWORD", "postgres")
+    return f"host={host} port={port} dbname={db} user={usr} password={pwd}"
+
+def vector_literal(vec: Sequence[float]) -> str:
+    # pgvector accepts string form: '[0.1,0.2,...]'
+    return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+
+class PGVectorStore:
+    """
+    Minimal pgvector store using psycopg3
+    Table schema (recommended fresh setup):
+
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE TABLE IF NOT EXISTS chunks(
+      chunk_id TEXT PRIMARY KEY,
+      doc_id   TEXT,
+      text     TEXT,
+      source_type TEXT,
+      source_path TEXT,
+      heading_path JSONB,
+      page_or_time JSONB,
+      metadata JSONB,
+      embedding vector(<DIM>)
+    );
+    CREATE INDEX IF NOT EXISTS chunks_embedding_ivfflat
+      ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
+    """
+    def __init__(self, dsn: Optional[str] = None, embed_dim: int = DEFAULT_DIM):
+        self.dsn = dsn or dsn_from_env()
+        self.embed_dim = embed_dim
+
+    def connect(self):
+        return psycopg.connect(self.dsn, row_factory=dict_row)
+
+    def ensure_schema(self):
+        ddl = f"""
+        CREATE EXTENSION IF NOT EXISTS vector;
+        CREATE TABLE IF NOT EXISTS chunks(
+          chunk_id TEXT PRIMARY KEY,
+          doc_id   TEXT,
+          text     TEXT,
+          source_type TEXT,
+          source_path TEXT,
+          heading_path JSONB,
+          page_or_time JSONB,
+          metadata JSONB,
+          embedding vector({self.embed_dim})
+        );
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(ddl)
+            # Build ANN index (ivfflat) if missing
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relname = 'chunks_embedding_ivfflat'
+                  ) THEN
+                    EXECUTE 'CREATE INDEX chunks_embedding_ivfflat
+                             ON chunks USING ivfflat (embedding vector_cosine_ops)
+                             WITH (lists=100)';
+                  END IF;
+                END $$;
+            """)
+            # Optional text search index (uncomment if you want sparse search baseline)
+            # cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+            # cur.execute("CREATE INDEX IF NOT EXISTS chunks_text_gin ON chunks USING gin (to_tsvector('english', text));")
+            conn.commit()
+
+    def upsert_batch(self, records: Sequence[EmbeddingRecord], batch_size: int = 500):
+        """
+        INSERT ... ON CONFLICT (chunk_id) DO UPDATE.
+        The vector is passed as a string literal cast to ::vector.
+        """
+        if not records:
+            return 0
+        inserted = 0
+        template = "(%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)"
+        sql_stmt = """
+        INSERT INTO chunks
+        (chunk_id, doc_id, text, source_type, source_path, heading_path, page_or_time, metadata, embedding)
+        VALUES %s
+        ON CONFLICT (chunk_id) DO UPDATE SET
+          doc_id = EXCLUDED.doc_id,
+          text   = EXCLUDED.text,
+          source_type = EXCLUDED.source_type,
+          source_path = EXCLUDED.source_path,
+          heading_path = EXCLUDED.heading_path,
+          page_or_time = EXCLUDED.page_or_time,
+          metadata = EXCLUDED.metadata,
+          embedding = EXCLUDED.embedding;
+        """
+        from psycopg.extras import execute_values
+
+        with self.connect() as conn, conn.cursor() as cur:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i+batch_size]
+                values = []
+                for r in batch:
+                    md = r.get("metadata", {}) or {}
+                    values.append((
+                        r["chunk_id"],
+                        r["doc_id"],
+                        r["text"],
+                        md.get("source_type"),
+                        md.get("source_path"),
+                        Json(md.get("heading_path", [])),
+                        Json(md.get("page_or_time")),
+                        Json(md),
+                        vector_literal(r["embedding"]),   # casted in template
+                    ))
+                execute_values(cur, sql_stmt, values, template=template, page_size=batch_size)
+                inserted += len(batch)
+            conn.commit()
+        return inserted
+
+    # (Optional) quick cosine ANN search to sanity-check index
+    def search_by_vector(self, qvec: Sequence[float], k: int = 12) -> List[Dict[str, Any]]:
+        qlit = vector_literal(qvec)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT chunk_id, doc_id, text, source_path, metadata,
+                       1 - (embedding <=> %s::vector) AS score
+                FROM chunks
+                ORDER BY embedding <-> %s::vector
+                LIMIT %s;
+                """, (qlit, qlit, k)
+            )
+            return cur.fetchall()
+
+```
+## scripts/build_index.py
+
+```python
+# Build the pgvector index from data/ using psycopg, batching embeddings.
+from __future__ import annotations
+import os, asyncio, math
+from pathlib import Path
+from typing import List
+from src.ingestion.load_files import walk_data_dir
+from src.ingestion.normalize import normalize_rawdoc
+from src.ingestion.chunk import chunk_document, Chunk
+from src.ingestion.embed import aembed_chunks, Embedder, EmbeddingRecord
+from src.ingestion.pgvector_store import PGVectorStore, DEFAULT_DIM
+
+DATA_DIR = os.getenv("DATA_DIR", "data")
+MAX_TOKENS   = int(os.getenv("CHUNK_MAX_TOKENS", "350"))
+OVERLAP_TOKS = int(os.getenv("CHUNK_OVERLAP_TOKENS", "60"))
+EMBED_BATCH  = int(os.getenv("EMBED_BATCH", "256"))
+UPSERT_BATCH = int(os.getenv("UPSERT_BATCH", "500"))
+
+async def embed_and_upsert(
+    store: PGVectorStore,
+    embedder: Embedder,
+    chunks: List[Chunk]
+) -> int:
+    # Embed in manageable batches to respect rate limits
+    total = 0
+    for i in range(0, len(chunks), EMBED_BATCH):
+        sub = chunks[i:i+EMBED_BATCH]
+        recs: List[EmbeddingRecord] = await aembed_chunks(sub, embedder)
+        total += store.upsert_batch(recs, batch_size=UPSERT_BATCH)
+    return total
+
+async def main():
+    print(f"[build_index] Using DATA_DIR={DATA_DIR}")
+    store = PGVectorStore(embed_dim=DEFAULT_DIM)
+    store.ensure_schema()
+
+    embedder = Embedder(model=os.getenv("EMBED_MODEL", "text-embedding-3-large"))
+
+    # Stream docs → normalize → chunk → buffer → embed+upsert
+    buffer: List[Chunk] = []
+    indexed = 0
+    doc_count = 0
+
+    for raw in walk_data_dir(DATA_DIR, include_pdf=False):
+        doc_count += 1
+        norm = normalize_rawdoc(raw)
+        pieces = list(chunk_document(norm, max_tokens=MAX_TOKENS, overlap_tokens=OVERLAP_TOKS))
+        buffer.extend(pieces)
+
+        # Flush in ~2000-chunk groups for memory safety
+        if len(buffer) >= 2000:
+            print(f"[build_index] Embedding {len(buffer)} chunks …")
+            indexed += await embed_and_upsert(store, embedder, buffer)
+            buffer.clear()
+            print(f"[build_index] Total indexed so far: {indexed}")
+
+    if buffer:
+        print(f"[build_index] Embedding final {len(buffer)} chunks …")
+        indexed += await embed_and_upsert(store, embedder, buffer)
+        buffer.clear()
+
+    print(f"[build_index] DONE. Docs: {doc_count}, Chunks indexed: {indexed}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+```
