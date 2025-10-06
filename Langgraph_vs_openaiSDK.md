@@ -7,7 +7,7 @@ awesome — here’s a clean, production-ready Part-1 ingestion pack with four f
 All files use strict type hints and small, well-documented APIs so you can drop them in.
 
 ⸻
-
+```
 load_files.py
 
 # src/ingestion/load_files.py
@@ -97,9 +97,9 @@ def walk_data_dir(root: str | Path, include_pdf: bool = False) -> Iterator[RawDo
                 },
             )
 
-
+```
 ⸻
-
+```
 normalize.py
 
 # src/ingestion/normalize.py
@@ -200,10 +200,10 @@ def normalize_rawdoc(doc: RawDoc) -> NormalizedDoc:
         headings=headings,
         metadata=metadata,
     )
-
+```
 
 ⸻
-
+```
 chunk.py
 
 # src/ingestion/chunk.py
@@ -339,9 +339,9 @@ def chunk_document(
             ordinal += 1
             cursor = end
 
-
+```
 ⸻
-
+```
 embed.py
 
 # src/ingestion/embed.py
@@ -424,12 +424,12 @@ def embed_chunks(chunks: Sequence[Chunk], embedder: Optional[Embedder] = None) -
         "text": c["text"],
         "metadata": c["metadata"],
     } for c, v in zip(chunks, vecs)]
-
+```
 
 ⸻
 
 How they fit together (mini driver)
-
+```
 # scripts/example_ingest_driver.py (optional helper to see flow)
 import asyncio
 from pathlib import Path
@@ -448,7 +448,7 @@ async def run():
 if __name__ == "__main__":
     asyncio.run(run())
 
-
+```
 ⸻
 
 if you want, I can add the pgvector “upsert” function next (with SQLAlchemy), or slot these into your build_index.py pipeline you already have.
