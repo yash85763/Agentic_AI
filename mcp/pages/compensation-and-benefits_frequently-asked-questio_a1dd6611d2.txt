@@ -1,0 +1,138 @@
+https://ucnet.universityofcalifornia.edu/compensation-and-benefits/frequently-asked-questions-about-ucrays.html
+
+Getting help with UCRAYS | UCnet
+Skip to content
+Resources
+Benefits and career
+Getting help with UCRAYS
+Getting help with UC Retirement At Your Service (UCRAYS)
+Need help creating, logging into or making the most of your UCRAYS account? Check out the contact information and how-to guides below to help you get started and take care of essential tasks related to your retirement account.
+Make sure to
+enable enhanced security features
+to keep your account secure.
+On this page:
+Contacting the UC Retirement Administration Service Center (RASC)
+General how-to guides
+How-to guides for faculty and staff
+How-to guides for retirees
+Contacting the UC Retirement Administration Service Center (RASC)
+If you have a question or service issue, contact the UC Retirement Administration Service Center (RASC):
+By sending a secure message through your
+UC Retirement At Your Service (UCRAYS) account
+. You may send documents as secure message attachments or by fax to 1-800-792-5178.
+By phone at 800-888-8267, from 7:00 a.m. to 4:30 p.m. (PT), Monday through Friday.
+UCRAYS how-to guides
+Check out quick step-by-step guides to using UCRAYS as an employee or retiree.
+For everyone — how to:
+Create and log in to your UCRAYS account
+Enable enhanced security features
+Retrieve your username and/or reset your password
+Send a secure message
+Update your contact information and preferences
+Add a beneficiary
+For employees — how to:
+Estimate retirement benefit income
+Go through the retirement process
+For retirees — how to:
+View or adjust your tax withholding
+Verify your pension income
+View and download your tax statements (1099-R)
+If you currently receive your 1099-R by U.S. mail and want to go green next year
+Enroll in, change or cancel direct deposit
+Create and log in to your UCRAYS account
+Go to UCRAYS:
+retirementatyourservice.ucop.edu
+At your first login, and after agreeing to the UCRAYS privacy statement and terms of use, you will be asked security questions to confirm your identity and create a new password for your UCRAYS account.
+If you’re using a computer or smartphone that is secure, register your trusted device to skip your security questions for future logins.
+Add your cell phone number and personal email address, if they’re not already on file.
+It may be helpful to clear your browser’s cache/cookies/browsing history and open a new browsing session before you start your login or registration process – especially if you just received a one-time password. To find out how, search “clear browsing history” in your browser’s help bar.
+If you have login issues that you’re unable to resolve on your own, please call the RASC at 800-888-8267.
+Enable enhanced security features
+Log in to your
+UCRAYS
+account using your username and password.
+When prompted to “Protect Your UCRAYS Account,” click “Enable enhanced security” to navigate to the “Set Enhanced Security” page.
+Check “Enable enhanced security as part of my UCRAYS authentication” and click “Confirm.”
+Once enhanced security is enabled, you will be prompted to enter a one-time security code each time you log in to your account.
+Retrieve your username and/or reset your password
+To retrieve your username:
+Click “Forgot Username” on the UCRAYS login screen.
+You’ll be asked for the last four digits of your SSN, your date of birth and your last name.
+To reset your password:
+Enter your username on the UCRAYS login screen.
+On the next screen, click “Forgot Password?”
+You’ll be asked to enter the last four digits of your SSN and your date of birth.
+To ensure the security of your account, you’ll then be asked to answer a series of questions that are personal in nature and are likely ones that only you would be able to answer. This process is managed by a third-party vendor that specializes in identity verification.
+Send a secure message
+Sending a secure message through UCRAYS is the safest, most efficient way to communicate with the RASC. To send a secure message, including attachments, through
+UCRAYS
+, just click on “Messages” in the left menu.
+Update your contact information and preferences
+In the upper left of the UCRAYS main menu, click “Edit Profile” and select “Address,” “Email & Phone” or “Communication Preferences.”
+When you update your contact information, you’ll have a new option to share your personal email with your UC retiree center so they can reach out about events and resources. Just check the box to make sure you stay in the know, and they will put you on their contact list.
+Address
+On the Address page, click the address type (temporary, mailing or home) that needs to be updated, then enter the new address information.
+Please note:
+Medicare requires a
+physical address
+for enrollment. Please make sure to put your physical address in the home address field. If you have a PO Box that you would like to add, you may use the mailing address field.
+After reviewing and confirming your address update, a confirmation will be sent to your email address on file.
+Email & Phone
+On the Email & Phone page, enter your new email and/or cell phone information and click “Update Email/Phone.” A confirmation will be sent to your email address on file.
+Check the Release checkbox if you consent to release your personal email to your UC retiree center.
+Communication preferences
+On the Communication preferences page, update the delivery preference dropdown for each communication type – direct deposit advice, newsletters (New Dimensions) and other general information, and tax statements. When you’re finished, click “Update Communication Preferences.”
+You’ll see a confirmation of your changes, which will also be sent to your email address on file.
+Add a beneficiary
+On the UCRAYS main menu, click “Manage Contacts.”
+On the Manage Contacts page, click “Manage Beneficiaries.”
+On the Manage Beneficiaries page, click “Add/Edit Beneficiary.”
+On the Beneficiary Designation page, click “Add New Beneficiary.”
+Enter your new beneficiary’s information. If your new beneficiary is already a existing contact, you can select that person from the Existing Contact dropdown to automatically fill in their information. Click “Add New Beneficiary.”
+Repeat the process to add multiple beneficiaries. When you are finished, click “Next.”
+On the Beneficiary Designation page, specify whether each beneficiary is primary or secondary. You may enter a percentage share amount or check “Equal Share” to evenly distribute shares among your beneficiaries. When you are finished, click “Next.”
+Review and confirm your beneficiary designations. A confirmation will be sent to your email address on file.
+View or adjust your tax withholding
+On the UCRAYS main menu, click “Benefit Payment Details.”
+On the Benefit Payment & Taxes page, click “View/Change Tax Withholding.”
+On the Tax Withholding page, you’ll see your current federal and state tax withholding elections and have the option to make changes. When you’re finished, click “Update Tax Withholding.”
+Review your changes, check the certification checkbox, and click “Confirm”.
+Your confirmation will include the effective payment date of your tax withholding changes.
+Verify your pension income
+On the left side of the home page, under “My Accounts,” go to “Benefit Payments &Taxes,” and then click “Request Verification of Income.”
+In moments, you will receive an email that an official verification letter is available in your UCRAYS accounts. (Click “Messages” on your UCRAYS page)
+View and download your tax statements (1099-R)
+Go to “Benefit Payments & Taxes” and click “Tax Statements.”
+For security reasons, you will be sent an email when you view the statement(s).
+Receive your 1099-R electronically
+Go to “Edit Profile” then to “Communications Preferences.”
+Under “Tax Statements,” choose “UCRAYS.”
+Estimate retirement benefit income
+On the left side menu, select “My Account” and then “Retirement Estimates and Election.”
+A standard estimate of your basic retirement income at several ages will be displayed. To customize your estimate, select “Create a Retirement Estimate” and follow the prompts to enter relevant details.
+Enroll in, change or cancel direct deposit
+Select “My Account” on the left side menu.
+Click “Benefit Payment & Taxes” and follow the instructions.
+Go through the retirement process
+UCRP members can initiate and process their retirements electronically through
+UC Retirement At Your Service (UCRAYS)
+by following the steps in
+What to do if you’re preparing for retirement
+.
+Here are a few other UCRAYS features that will help you through the retirement process:
+Secure messages:
+Stay in touch with the RASC every step of the way.
+Upload documentation:
+Once you have received your Personal Retirement Profile (PRP), you will see “Upload Documentation” in the left menu. Select “
+Upload Documentation”
+to submit – securely and efficiently – all of the documents required for your retirement.
+Retirement application progress tracker:
+As soon as you have successfully initiated your retirement, you’ll see the retirement application progress tracker on your UCRAYS dashboard. The tracker will show you where you are in the process, and highlight any actions you need to take.
+Resources
+Benefits plan contacts
+Getting help with UCRAYS
+Expand
+HR forms and publications
+HR Form Search
+Keep your beneficiary information up to date
+UCPath online for former employees
