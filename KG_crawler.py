@@ -266,6 +266,30 @@ class KnowledgeGraphCrawler:
         
         return text
     
+    def extract_page_title(self, soup):
+        """Extract page title from h1, h2, or h3 tags (priority order)"""
+        # Try to find title from page-body first
+        page_body = soup.find(class_='page-body')
+        search_area = page_body if page_body else soup
+        
+        # Try h1 first
+        h1 = search_area.find('h1')
+        if h1 and h1.get_text(strip=True):
+            return h1.get_text(strip=True)
+        
+        # Try h2 if no h1
+        h2 = search_area.find('h2')
+        if h2 and h2.get_text(strip=True):
+            return h2.get_text(strip=True)
+        
+        # Try h3 if no h2
+        h3 = search_area.find('h3')
+        if h3 and h3.get_text(strip=True):
+            return h3.get_text(strip=True)
+        
+        # Fallback to URL-based name
+        return None
+    
     def create_safe_filename(self, url):
         """Create safe filename from URL"""
         url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
@@ -395,6 +419,13 @@ class KnowledgeGraphCrawler:
                     html = self.page.content()
                     soup = BeautifulSoup(html, 'html.parser')
                     text = self.extract_page_body_content(soup)
+                    # Extract page title from h1/h2/h3 and update node label
+                    page_title = self.extract_page_title(soup)
+                    if page_title:
+                        self.graph.nodes[url]['label'] = page_title
+                        print(f"  ✓ Page title: {page_title}")
+                    else:
+                        print(f"  ⚠ No h1/h2/h3 found, using URL-based name")
                 
                 # Save content
                 filepath = self.save_content(url, text)
