@@ -10,35 +10,30 @@ import time
 import networkx as nx
 
 class KnowledgeGraphCrawler:
-    def __init__(self, start_url, main_domains, include_domains, nav_links, 
-                 max_depth=None, nav_container_class="page-header", output_dir="kg_output",
-                 proxy=None):
+    def __init__(self, start_url, main_domains, max_depth=None, output_dir="kg_output", proxy=None, max_pages=None):
         """
         Knowledge Graph Crawler
         
         Args:
-            start_url: Starting URL
+            start_url: Starting URL (homepage)
             main_domains: List of domains to crawl completely
-            include_domains: List of domains to crawl up to depth 2
-            nav_links: List of navigation URLs/paths (for "back_to_page" relationship)
             max_depth: Maximum crawl depth (None = unlimited for main domains)
-            nav_container_class: CSS class containing navigation (default: "page-header")
             output_dir: Output directory
             proxy: Proxy server (e.g., "http://proxy.example.com:8080")
         """
         self.start_url = start_url
         self.main_domains = [d.lower() for d in main_domains]
-        self.include_domains = [d.lower() for d in include_domains]
-        self.nav_links = set(nav_links) if nav_links else set()
         self.max_depth = max_depth
-        self.nav_container_class = nav_container_class
         self.output_dir = output_dir
         self.proxy = proxy
+        self.max_pages = max_pages
         
         self.visited = set()
+        self.queued = set()
         self.graph = nx.DiGraph()
         self.page_contents = {}
-        self.domain_depths = {}
+        self.is_first_page = True
+        self.homepage_nav_links = set()
         
         self.playwright = None
         self.browser = None
@@ -67,7 +62,6 @@ class KnowledgeGraphCrawler:
             # Add proxy if provided
             if self.proxy:
                 print(f"Configuring proxy: {self.proxy}")
-                # Playwright expects proxy in a specific format
                 proxy_config = {'server': self.proxy}
                 launch_options['proxy'] = proxy_config
             
@@ -141,11 +135,6 @@ class KnowledgeGraphCrawler:
         domain = self.get_domain(url)
         return any(domain == d or domain.endswith('.' + d) for d in self.main_domains)
     
-    def is_include_domain(self, url):
-        """Check if URL is from include domains"""
-        domain = self.get_domain(url)
-        return any(domain == d or domain.endswith('.' + d) for d in self.include_domains)
-    
     def is_pdf(self, url):
         """Check if URL points to a PDF file (by .pdf extension)"""
         try:
@@ -168,103 +157,45 @@ class KnowledgeGraphCrawler:
         except:
             return "external_link"
     
-    def is_in_navigation_container(self, element):
-        """Check if element is within the navigation container"""
-        current = element
-        for _ in range(10):  # Check up to 10 levels up
-            if current is None:
-                break
-            
-            # Check if current element has the navigation container class
-            classes = current.get('class', [])
-            if isinstance(classes, str):
-                classes = classes.split()
-            if self.nav_container_class in classes:
-                return True
-            
-            # Move to parent
-            current = current.parent
+    def extract_page_body_content(self, soup, include_header=False):
+        """Extract content from page-body class, optionally including page-header"""
         
-        return False
-    
-    def url_matches_nav_link(self, url):
-        """Check if URL matches any navigation link"""
-        for nav_link in self.nav_links:
-            # Exact match
-            if url == nav_link:
-                return True
-            # Pattern match (if nav_link is a path pattern)
-            if nav_link in url:
-                return True
-        return False
-    
-    def extract_page_links(self, soup, base_url):
-        """Extract all links from page"""
-        links = []
-        seen_key = set()
-        
-        for a_tag in soup.find_all('a', href=True):
-            href = a_tag.get('href')
+        if include_header:
+            # For homepage: parse everything
+            body = soup.find('body')
+            if not body:
+                return ""
             
-            # Skip invalid links
-            if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
-                continue
+            # Remove unwanted elements but keep page-header
+            for tag in body.find_all(["script", "style", "iframe", "noscript"]):
+                tag.decompose()
             
-            # Convert to absolute URL
-            absolute_url = urljoin(base_url, href)
+            text = body.get_text(separator='\n', strip=True)
+            text = re.sub(r'\n\s*\n', '\n\n', text)
+            return text
+        else:
+            # For other pages: only page-body, exclude page-header
+            page_body = soup.find(class_='page-body')
             
-            # Remove fragment
-            absolute_url = absolute_url.split('#')[0]
+            if not page_body:
+                print("    ⚠ Warning: No 'page-body' class found")
+                return ""
             
-            # Get link text
-            link_text = a_tag.get_text(strip=True) or "Link"
+            # Remove page-header and page-footer elements from page-body (if any nested)
+            for header in page_body.find_all(class_='page-header'):
+                header.decompose()
+            for footer in page_body.find_all(class_='page-footer'):
+                footer.decompose()
+
+            # Remove unwanted elements
+            for tag in page_body.find_all(["script", "style", "nav", "footer", "iframe", "noscript"]):
+                tag.decompose()
             
-            # Check if this is a navigation link:
-            # Must be BOTH in navigation container AND match nav link list
-            in_nav_container = self.is_in_navigation_container(a_tag)
-            matches_nav_url = self.url_matches_nav_link(absolute_url)
-            is_nav = in_nav_container and matches_nav_url
+            # Extract text
+            text = page_body.get_text(separator='\n', strip=True)
+            text = re.sub(r'\n\s*\n', '\n\n', text)
             
-            # Create unique key (url, is_nav) to allow same URL with different context
-            key = (absolute_url, is_nav)
-            if key in seen_key:
-                continue
-            seen_key.add(key)
-            
-            links.append({
-                'url': absolute_url,
-                'link_text': link_text,
-                'is_navigation': is_nav
-            })
-        
-        return links
-    
-    def extract_page_body_content(self, soup):
-        """Extract content only from page-body class, excluding page-header"""
-        # Find the page-body element
-        page_body = soup.find(class_='page-body')
-        
-        if not page_body:
-            print("    ⚠ Warning: No 'page-body' class found, extracting from entire page")
-            # Fallback to entire body if page-body doesn't exist
-            page_body = soup.find('body')
-        
-        if not page_body:
-            return ""
-        
-        # Remove page-header elements from page-body (if any nested)
-        for header in page_body.find_all(class_='page-header'):
-            header.decompose()
-        
-        # Remove unwanted elements
-        for tag in page_body.find_all(["script", "style", "nav", "footer", "iframe", "noscript"]):
-            tag.decompose()
-        
-        # Extract text
-        text = page_body.get_text(separator='\n', strip=True)
-        text = re.sub(r'\n\s*\n', '\n\n', text)
-        
-        return text
+            return text
     
     def extract_page_title(self, soup):
         """Extract page title from h1, h2, or h3 tags (priority order)"""
@@ -289,6 +220,67 @@ class KnowledgeGraphCrawler:
         
         # Fallback to URL-based name
         return None
+    
+    def extract_nav_links_from_header(self, soup, base_url):
+        """Extract navigation links from page-header (only called once for homepage)"""
+        nav_links = []
+        
+        page_header = soup.find(class_='page-header')
+        if not page_header:
+            print("  ⚠ No page-header found on homepage")
+            return nav_links
+        
+        for a_tag in page_header.find_all('a', href=True):
+            href = a_tag.get('href')
+            
+            # Skip invalid links
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
+                continue
+            
+            # Convert to absolute URL
+            absolute_url = urljoin(base_url, href)
+            
+            # Remove fragment
+            absolute_url = absolute_url.split('#')[0]
+            
+            # Only keep links from main domain
+            if self.is_main_domain(absolute_url):
+                nav_links.append(absolute_url)
+        
+        return nav_links
+    
+    def extract_page_links(self, soup, base_url):
+        """Extract all links from page"""
+        links = []
+        seen_urls = set()
+        
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag.get('href')
+            
+            # Skip invalid links
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
+                continue
+            
+            # Convert to absolute URL
+            absolute_url = urljoin(base_url, href)
+            
+            # Remove fragment
+            absolute_url = absolute_url.split('#')[0]
+            
+            # Skip duplicates
+            if absolute_url in seen_urls:
+                continue
+            seen_urls.add(absolute_url)
+            
+            # Get link text
+            link_text = a_tag.get_text(strip=True) or "Link"
+            
+            links.append({
+                'url': absolute_url,
+                'link_text': link_text
+            })
+        
+        return links
     
     def create_safe_filename(self, url):
         """Create safe filename from URL"""
@@ -329,17 +321,11 @@ class KnowledgeGraphCrawler:
         if self.max_depth is not None and current_depth > self.max_depth:
             return False
         
-        # Main domain - crawl up to max_depth (or unlimited if max_depth is None)
+        # Only crawl main domain
         if self.is_main_domain(url):
             return True
         
-        # Include domain - crawl up to depth 2
-        if self.is_include_domain(url):
-            if url not in self.domain_depths:
-                self.domain_depths[url] = current_depth
-            return self.domain_depths[url] <= 2
-        
-        # External - don't crawl
+        # Everything else - don't crawl
         return False
     
     def crawl(self):
@@ -348,21 +334,27 @@ class KnowledgeGraphCrawler:
         print("KNOWLEDGE GRAPH CRAWLER - PLAYWRIGHT VERSION")
         print("="*80)
         depth_info = f"max depth {self.max_depth}" if self.max_depth is not None else "unlimited depth"
-        print(f"Main domains ({depth_info}): {', '.join(self.main_domains)}")
-        if self.include_domains:
-            print(f"Include domains (depth ≤ 2): {', '.join(self.include_domains)}")
-        print(f"Navigation container: .{self.nav_container_class}")
-        print(f"Navigation links: {len(self.nav_links)} provided")
-        print(f"Content parsing: Only from 'page-body' class (excluding 'page-header')")
+        pages_info = f"max {self.max_pages} pages" if self.max_pages is not None else "unlimited pages"
+        print(f"Main domains ({depth_info}, {pages_info}): {', '.join(self.main_domains)}")
+        print(f"Content parsing: 'page-body' only (excluding page-header and page-footer)")
+        print(f"Navbar links: Detected but not included in graph relationships")
+        print(f"Node naming: h1 > h2 > h3 from page-body")
         print("="*80 + "\n")
         
         if not self.setup_browser():
             return
         
         queue = deque([(self.start_url, 0)])
+        self.queued.add(self.start_url)  # Track the start URL as queued
         
         try:
             while queue:
+                # Check if page limit reached
+                if self.max_pages is not None and len(self.visited) >= self.max_pages:
+                    print(f"\n⚠ Page limit reached ({self.max_pages} pages). Stopping crawl.")
+                    print(f"  Remaining URLs in queue: {len(queue)}")
+                    break
+
                 url, depth = queue.popleft()
                 
                 # Skip if already visited
@@ -380,17 +372,17 @@ class KnowledgeGraphCrawler:
                                        is_pdf=self.is_pdf(url))
                     continue
                 
-                domain_type = "MAIN" if self.is_main_domain(url) else "INCLUDE"
+                page_type = "HOMEPAGE" if self.is_first_page else "PAGE"
                 print(f"\n{'='*80}")
-                print(f"[{domain_type}] Depth {depth}: {url}")
+                print(f"[{page_type}] Depth {depth}: {url}")
                 print(f"{'='*80}")
                 
                 self.visited.add(url)
                 
-                # Add node to graph
+                # Add node to graph (will update label after extracting content)
                 self.graph.add_node(url, 
                                    depth=depth, 
-                                   label=self.get_entity_name_from_url(url),
+                                   label=self.get_entity_name_from_url(url),  # Temporary label
                                    is_external=False, 
                                    is_pdf=False)
                 
@@ -409,8 +401,29 @@ class KnowledgeGraphCrawler:
                 html = self.page.content()
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                # Extract text from page-body only (excluding page-header)
-                text = self.extract_page_body_content(soup)
+                # Special handling for homepage (first page)
+                if self.is_first_page:
+                    print("  → HOMEPAGE: Parsing complete page including navbar")
+                    
+                    # Extract navigation links from page-header
+                    nav_links = self.extract_nav_links_from_header(soup, url)
+                    self.homepage_nav_links = set(nav_links)
+                    print(f"  ✓ Extracted {len(self.homepage_nav_links)} navigation links from navbar")
+                    if self.homepage_nav_links:
+                        for nav_link in list(self.homepage_nav_links)[:5]:
+                            print(f"    • {nav_link}")
+                        if len(self.homepage_nav_links) > 5:
+                            print(f"    ... and {len(self.homepage_nav_links) - 5} more")
+                    
+                    # Extract text from entire page (including header for homepage)
+                    text = self.extract_page_body_content(soup, include_header=True)
+                    
+                    # Mark that we've processed the first page
+                    self.is_first_page = False
+                else:
+                    print("  → Parsing page-body only (ignoring navbar)")
+                    # Extract text from page-body only (excluding page-header)
+                    text = self.extract_page_body_content(soup, include_header=False)
                 
                 # Check content quality
                 if len(text) < 100:
@@ -418,29 +431,33 @@ class KnowledgeGraphCrawler:
                     time.sleep(3)
                     html = self.page.content()
                     soup = BeautifulSoup(html, 'html.parser')
-                    text = self.extract_page_body_content(soup)
-                    # Extract page title from h1/h2/h3 and update node label
-                    page_title = self.extract_page_title(soup)
-                    if page_title:
-                        self.graph.nodes[url]['label'] = page_title
-                        print(f"  ✓ Page title: {page_title}")
+                    if self.is_first_page:
+                        text = self.extract_page_body_content(soup, include_header=True)
                     else:
-                        print(f"  ⚠ No h1/h2/h3 found, using URL-based name")
+                        text = self.extract_page_body_content(soup, include_header=False)
+                
+                # Extract page title from h1/h2/h3 and update node label
+                page_title = self.extract_page_title(soup)
+                if page_title:
+                    self.graph.nodes[url]['label'] = page_title
+                    print(f"  ✓ Page title: {page_title}")
+                else:
+                    print(f"  ⚠ No h1/h2/h3 found, using URL-based name")
                 
                 # Save content
                 filepath = self.save_content(url, text)
                 if filepath:
                     self.page_contents[url] = filepath
-                    print(f"  ✓ Content saved from 'page-body' ({len(text)} chars)")
+                    print(f"  ✓ Content saved ({len(text)} chars)")
                 
-                # Extract links (from entire page for navigation detection)
+                # Extract links
                 print(f"  → Extracting links...")
                 links = self.extract_page_links(soup, url)
                 
                 # Count navigation vs content links
-                nav_count = sum(1 for l in links if l['is_navigation'])
-                new_count = len(links) - nav_count
-                print(f"  ✓ Found {len(links)} links ({nav_count} navigation, {new_count} content)")
+                nav_count = sum(1 for l in links if l['url'] in self.homepage_nav_links)
+                content_count = len(links) - nav_count
+                print(f"  ✓ Found {len(links)} links ({nav_count} navigation [ignored], {content_count} content)")
                 
                 # Process links
                 queued = 0
@@ -450,13 +467,17 @@ class KnowledgeGraphCrawler:
                 for link in links:
                     target_url = link['url']
                     link_text = link['link_text']
-                    is_nav = link['is_navigation']
                     
-                    # Use "back_to_page" for navigation links
-                    relationship = "back_to_page" if is_nav else link_text
+                    # Check if this link is from the homepage navbar
+                    is_nav = target_url in self.homepage_nav_links
                     
-                    # Add edge to graph
-                    self.graph.add_edge(url, target_url, relationship=relationship)
+                    # Skip navigation links (back_to_page relationships)
+                    if is_nav:
+                        # Still need to queue the URL for crawling, but don't add edge
+                        pass
+                    else:
+                        # Add edge to graph only for content links
+                        self.graph.add_edge(url, target_url, relationship=link_text)
                     
                     # Handle different URL types
                     if self.is_pdf(target_url):
@@ -469,34 +490,20 @@ class KnowledgeGraphCrawler:
                         pdf_count += 1
                         
                     elif self.is_main_domain(target_url):
-                        # Main domain - queue if not visited and within depth limit
-                        if target_url not in self.visited:
+                        # Main domain - queue if not visited AND not already queued
+                        if target_url not in self.visited and target_url not in self.queued:
                             if self.max_depth is None or depth < self.max_depth:
                                 queue.append((target_url, depth + 1))
+                                self.queued.add(target_url)  # Mark as queued
                                 queued += 1
                             else:
                                 # Max depth reached - add as external entity
                                 entity_name = self.get_entity_name_from_url(target_url)
                                 self.graph.add_node(target_url, 
-                                                   label=entity_name, 
-                                                   is_external=True, 
-                                                   is_pdf=False)
+                                                label=entity_name, 
+                                                is_external=True, 
+                                                is_pdf=False)
                                 external_count += 1
-                            
-                    elif self.is_include_domain(target_url):
-                        # Include domain - queue only if depth < 2
-                        if depth < 2 and target_url not in self.visited:
-                            queue.append((target_url, depth + 1))
-                            queued += 1
-                        elif depth >= 2:
-                            # Too deep - add as external entity
-                            entity_name = self.get_entity_name_from_url(target_url)
-                            self.graph.add_node(target_url, 
-                                               label=entity_name, 
-                                               is_external=True, 
-                                               is_pdf=False)
-                            external_count += 1
-                            
                     else:
                         # External domain - add as external entity
                         entity_name = self.get_entity_name_from_url(target_url)
@@ -508,7 +515,7 @@ class KnowledgeGraphCrawler:
                 
                 print(f"  ✓ Queued: {queued} new URLs")
                 print(f"  ✓ External: {external_count} links, {pdf_count} PDFs")
-                print(f"  → Progress: Queue={len(queue)}, Visited={len(self.visited)}")
+                print(f"  → Progress: Queue={len(queue)}, Visited={len(self.visited)}, Total Discovered={len(self.queued)}")
                 
                 # Be polite
                 time.sleep(1)
@@ -534,6 +541,7 @@ class KnowledgeGraphCrawler:
         external_nodes = [n for n, d in self.graph.nodes(data=True) if d.get('is_external', False)]
         print(f"PDF documents: {len(pdf_nodes)}")
         print(f"External entities: {len(external_nodes)}")
+        print(f"Navbar links detected: {len(self.homepage_nav_links)}")
         print(f"{'='*80}\n")
     
     def save_json(self):
@@ -542,14 +550,13 @@ class KnowledgeGraphCrawler:
             'metadata': {
                 'start_url': self.start_url,
                 'main_domains': self.main_domains,
-                'include_domains': self.include_domains,
                 'max_depth': self.max_depth,
-                'nav_container_class': self.nav_container_class,
-                'nav_links_count': len(self.nav_links),
                 'total_nodes': self.graph.number_of_nodes(),
                 'total_edges': self.graph.number_of_edges(),
                 'crawled_pages': len(self.visited),
-                'content_source': 'page-body class only (excluding page-header)'
+                'navbar_links': len(self.homepage_nav_links),
+                'content_source': 'page-body class (navbar parsed once from homepage)',
+                'node_naming': 'h1 > h2 > h3 from page-body'
             },
             'nodes': [],
             'edges': []
@@ -622,14 +629,14 @@ class KnowledgeGraphCrawler:
 </head>
 <body>
     <div class="header">
-        <h1>🕸️ Knowledge Graph Visualization (Playwright)</h1>
+        <h1>🕸️ Knowledge Graph Visualization</h1>
     </div>
     
     <div class="stats">
         <div class="stat"><div class="value" id="nodes">0</div><div class="label">Total Nodes</div></div>
         <div class="stat"><div class="value" id="edges">0</div><div class="label">Total Edges</div></div>
         <div class="stat"><div class="value" id="crawled">0</div><div class="label">Pages Crawled</div></div>
-        <div class="stat"><div class="value" id="pdfs">0</div><div class="label">PDF Documents</div></div>
+        <div class="stat"><div class="value" id="navbar">0</div><div class="label">Navbar Links</div></div>
         <div class="stat"><div class="value" id="external">0</div><div class="label">External Links</div></div>
     </div>
     
@@ -654,10 +661,9 @@ class KnowledgeGraphCrawler:
     
     <div class="legend">
         <strong>Legend</strong>
-        <div class="legend-item"><div class="legend-color" style="background: #667eea;"></div>Crawled Page (page-body)</div>
+        <div class="legend-item"><div class="legend-color" style="background: #667eea;"></div>Crawled Page</div>
         <div class="legend-item"><div class="legend-color" style="background: #e67e22;"></div>PDF Document</div>
         <div class="legend-item"><div class="legend-color" style="background: #e74c3c;"></div>External Link</div>
-        <div class="legend-item"><div class="legend-line" style="background: #3498db; border-style: dashed;"></div>Navigation</div>
         <div class="legend-item"><div class="legend-line" style="background: #666;"></div>Content Link</div>
     </div>
     
@@ -668,9 +674,9 @@ class KnowledgeGraphCrawler:
         document.getElementById('nodes').textContent = data.nodes.length;
         document.getElementById('edges').textContent = data.edges.length;
         document.getElementById('crawled').textContent = data.metadata.crawled_pages;
+        document.getElementById('navbar').textContent = data.metadata.navbar_links;
         const pdfCount = data.nodes.filter(n => n.is_pdf).length;
         const extCount = data.nodes.filter(n => n.is_external && !n.is_pdf).length;
-        document.getElementById('pdfs').textContent = pdfCount;
         document.getElementById('external').textContent = extCount;
         
         // Prepare nodes for vis.js
@@ -685,16 +691,15 @@ class KnowledgeGraphCrawler:
             ...n
         }));
         
-        // Prepare edges for vis.js
+        // Prepare edges for vis.js (no back_to_page edges anymore)
         const edges = data.edges.map(e => ({
             from: e.from,
             to: e.to,
             label: e.label,
             arrows: 'to',
-            color: { color: e.label === 'back_to_page' ? '#3498db' : '#666' },
+            color: { color: '#666' },
             font: { size: 9, color: '#aaa', strokeWidth: 0 },
-            dashes: e.label === 'back_to_page',
-            width: e.label === 'back_to_page' ? 2 : 1
+            width: 1
         }));
         
         // Create network
@@ -816,29 +821,29 @@ class KnowledgeGraphCrawler:
 
 def main():
     print("\n" + "="*80)
-    print("KNOWLEDGE GRAPH CRAWLER - PLAYWRIGHT VERSION")
+    print("KNOWLEDGE GRAPH CRAWLER - FINAL VERSION")
     print("="*80)
     print("Features:")
     print("  • Playwright browser automation")
-    print("  • Configurable max depth")
-    print("  • Explicit navigation link control")
-    print("  • PDF detection by .pdf extension")
-    print("  • Main domains: configurable depth")
-    print("  • Include domains: max depth 2")
-    print("  • Content parsing: Only 'page-body' class (excludes 'page-header')")
+    print("  • Navbar parsed once from homepage")
+    print("  • All other pages: parse page-body only")
+    print("  • Node naming: h1 > h2 > h3 from page-body")
+    print("  • Only crawls specified main domain(s)")
+    print("  • External links saved but not crawled")
     print("  • Proxy support")
     print("  • Interactive graph visualization")
     print("="*80 + "\n")
     
     # Get starting URL
-    start_url = input("Enter starting URL: ").strip()
+    start_url = input("Enter starting URL (homepage): ").strip()
     if not start_url:
         print("Error: Starting URL required")
         return
     
     # Get main domains
-    print("\nMain domains to crawl completely (comma-separated):")
-    print("  Example: example.com,www.example.com")
+    print("\nMain domain(s) to crawl (comma-separated):")
+    print("  Example: example.com")
+    print("  Or: example.com,www.example.com")
     main_domains = input("Main domains: ").strip()
     main_domains = [d.strip() for d in main_domains.split(',') if d.strip()]
     
@@ -846,33 +851,19 @@ def main():
         print("Error: At least one main domain required")
         return
     
-    # Get include domains
-    print("\nInclude domains to crawl up to depth 2 (optional, comma-separated):")
-    include_domains = input("Include domains: ").strip()
-    include_domains = [d.strip() for d in include_domains.split(',') if d.strip()] if include_domains else []
-    
     # Get max depth
     print("\nMaximum crawl depth (leave empty for unlimited):")
     print("  Example: 3, 4, 5")
     print("  Empty = crawl until no more pages")
     max_depth_input = input("Max depth: ").strip()
     max_depth = int(max_depth_input) if max_depth_input else None
-    
-    # Get navigation configuration
-    print("\nNavigation container CSS class:")
-    print("  This is the CSS class that wraps your navigation menu")
-    print("  Example: page-header, navbar, navigation, header-nav")
-    nav_container = input("Nav container class (default: page-header): ").strip()
-    nav_container = nav_container if nav_container else "page-header"
-    
-    print("\nNavigation links (URLs or paths, comma-separated):")
-    print("  Example: /home,/about,/products,/contact")
-    print("  Or: https://example.com/home,https://example.com/about")
-    print("  These will use 'back_to_page' when found in the navigation container")
-    nav_links_input = input("Nav links: ").strip()
-    nav_links = []
-    if nav_links_input:
-        nav_links = [link.strip() for link in nav_links_input.split(',') if link.strip()]
+
+    # Get max pages
+    print("\nMaximum pages to crawl (leave empty for unlimited):")
+    print("  Example: 50, 100, 200")
+    print("  Empty = crawl all pages up to max depth")
+    max_pages_input = input("Max pages: ").strip()
+    max_pages = int(max_pages_input) if max_pages_input else None
     
     # Get proxy configuration (optional)
     print("\nProxy server (optional, leave empty to skip):")
@@ -889,21 +880,15 @@ def main():
     print(f"Start URL: {start_url}")
     depth_display = f"{max_depth}" if max_depth is not None else "unlimited"
     print(f"Max depth: {depth_display}")
+    pages_display = f"{max_pages}" if max_pages is not None else "unlimited"
+    print(f"Max pages: {pages_display}")
     print(f"Main domains ({len(main_domains)}): {', '.join(main_domains)}")
-    if include_domains:
-        print(f"Include domains ({len(include_domains)}): {', '.join(include_domains)}")
-    print(f"Navigation container: .{nav_container}")
-    if nav_links:
-        print(f"Navigation links ({len(nav_links)}):")
-        for link in nav_links[:5]:
-            print(f"  • {link}")
-        if len(nav_links) > 5:
-            print(f"  ... and {len(nav_links) - 5} more")
-    else:
-        print("Navigation links: None provided")
     if proxy:
         print(f"Proxy: {proxy}")
-    print(f"Content parsing: Only 'page-body' class (excluding 'page-header')")
+    print(f"Parsing strategy:")
+    print(f"  - Homepage: Complete page including navbar")
+    print(f"  - Other pages: page-body only (navbar ignored)")
+    print(f"Node naming: h1 > h2 > h3 from page-body")
     print(f"{'='*80}\n")
     
     # Confirm
@@ -917,11 +902,9 @@ def main():
     crawler = KnowledgeGraphCrawler(
         start_url=start_url,
         main_domains=main_domains,
-        include_domains=include_domains,
-        nav_links=nav_links,
         max_depth=max_depth,
-        nav_container_class=nav_container,
-        proxy=proxy
+        proxy=proxy, 
+        max_pages=max_pages
     )
     
     # Start crawling
@@ -943,9 +926,10 @@ def main():
     print("\nFiles created:")
     print(f"  📊 interactive_graph.html  ← OPEN THIS in your browser!")
     print(f"  📄 graph.json              ← Complete graph data")
-    print(f"  📁 pages/*.txt             ← Crawled page contents (from 'page-body' only)")
+    print(f"  📁 pages/*.txt             ← Crawled page contents")
     print("\nGraph Statistics:")
     print(f"  • Pages crawled: {len(crawler.visited)}")
+    print(f"  • Navbar links detected: {len(crawler.homepage_nav_links)}")
     print(f"  • Total nodes: {crawler.graph.number_of_nodes()}")
     print(f"  • Total edges: {crawler.graph.number_of_edges()}")
     print("="*80 + "\n")
