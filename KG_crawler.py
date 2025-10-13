@@ -8,9 +8,11 @@ import hashlib
 from collections import deque
 import time
 import networkx as nx
+from embeddings import EmbeddingGenerator
 
 class KnowledgeGraphCrawler:
-    def __init__(self, start_url, main_domains, max_depth=None, output_dir="kg_output", proxy=None, max_pages=None):
+    def __init__(self, start_url, main_domains, max_depth=None, output_dir="kg_output", proxy=None, max_pages=None, openai_api_key=None, 
+             embedding_model="text-embedding-3-small", generate_embeddings=True):
         """
         Knowledge Graph Crawler
         
@@ -34,6 +36,22 @@ class KnowledgeGraphCrawler:
         self.page_contents = {}
         self.is_first_page = True
         self.homepage_nav_links = set()
+
+        self.homepage_nav_links = set()
+
+        # Embedding configuration
+        self.generate_embeddings = generate_embeddings
+        self.embedding_generator = None
+        if self.generate_embeddings:
+            try:
+                self.embedding_generator = EmbeddingGenerator(
+                    api_key=openai_api_key,
+                    model=embedding_model
+                )
+            except Exception as e:
+                print(f"⚠ Warning: Could not initialize embedding generator: {e}")
+                print("  Continuing without embeddings...")
+                self.generate_embeddings = False
         
         self.playwright = None
         self.browser = None
@@ -443,12 +461,28 @@ class KnowledgeGraphCrawler:
                     print(f"  ✓ Page title: {page_title}")
                 else:
                     print(f"  ⚠ No h1/h2/h3 found, using URL-based name")
-                
+
                 # Save content
                 filepath = self.save_content(url, text)
                 if filepath:
                     self.page_contents[url] = filepath
                     print(f"  ✓ Content saved ({len(text)} chars)")
+
+                # Store text content in node
+                self.graph.nodes[url]['text'] = text
+
+                # Generate and store embeddings
+                if self.generate_embeddings and self.embedding_generator:
+                    print(f"  → Generating embeddings...")
+                    embedding = self.embedding_generator.generate_embedding(text)
+                    if embedding:
+                        self.graph.nodes[url]['embeddings'] = embedding
+                        print(f"  ✓ Embeddings generated (dim: {len(embedding)})")
+                    else:
+                        self.graph.nodes[url]['embeddings'] = None
+                        print(f"  ✗ Failed to generate embeddings")
+                else:
+                    self.graph.nodes[url]['embeddings'] = None
                 
                 # Extract links
                 print(f"  → Extracting links...")
@@ -548,29 +582,35 @@ class KnowledgeGraphCrawler:
         """Save graph to JSON"""
         data = {
             'metadata': {
-                'start_url': self.start_url,
-                'main_domains': self.main_domains,
-                'max_depth': self.max_depth,
-                'total_nodes': self.graph.number_of_nodes(),
-                'total_edges': self.graph.number_of_edges(),
-                'crawled_pages': len(self.visited),
-                'navbar_links': len(self.homepage_nav_links),
-                'content_source': 'page-body class (navbar parsed once from homepage)',
-                'node_naming': 'h1 > h2 > h3 from page-body'
-            },
+            'start_url': self.start_url,
+            'main_domains': self.main_domains,
+            'max_depth': self.max_depth,
+            'total_nodes': self.graph.number_of_nodes(),
+            'total_edges': self.graph.number_of_edges(),
+            'crawled_pages': len(self.visited),
+            'navbar_links': len(self.homepage_nav_links),
+            'content_source': 'page-body class (navbar parsed once from homepage)',
+            'node_naming': 'h1 > h2 > h3 from page-body',
+            'embeddings_enabled': self.generate_embeddings,
+            'embedding_model': self.embedding_generator.model if self.embedding_generator else None,
+            'embedding_dimension': self.embedding_generator.get_embedding_dimension() if self.embedding_generator else None
+        },
             'nodes': [],
             'edges': []
         }
         
         for node, attrs in self.graph.nodes(data=True):
-            data['nodes'].append({
+            node_data = {
                 'id': node,
                 'url': node,
                 'label': attrs.get('label', self.get_entity_name_from_url(node)),
                 'depth': attrs.get('depth', 0),
                 'is_external': attrs.get('is_external', False),
-                'is_pdf': attrs.get('is_pdf', False)
-            })
+                'is_pdf': attrs.get('is_pdf', False),
+                'text': attrs.get('text', ''),
+                'embeddings': attrs.get('embeddings', None)
+            }
+            data['nodes'].append(node_data)
         
         for src, tgt, attrs in self.graph.edges(data=True):
             data['edges'].append({
@@ -872,6 +912,32 @@ def main():
     print("    - HTTPS: https://proxy.example.com:8080")
     print("    - SOCKS5: socks5://127.0.0.1:1080")
     proxy = input("Proxy server: ").strip() or None
+
+    # Get OpenAI configuration
+    print("\nOpenAI Embeddings (optional, leave empty to skip):")
+    print("  You can set OPENAI_API_KEY environment variable")
+    print("  Or provide it here")
+    generate_embeddings_input = input("Generate embeddings? (y/n, default: n): ").strip().lower()
+    generate_embeddings = generate_embeddings_input == 'y'
+
+    openai_api_key = None
+    embedding_model = "text-embedding-3-small"
+    if generate_embeddings:
+        api_key_input = input("OpenAI API Key (or press Enter to use env variable): ").strip()
+        openai_api_key = api_key_input if api_key_input else None
+        
+        print("\nEmbedding model:")
+        print("  1. text-embedding-3-small (default, 1536 dim)")
+        print("  2. text-embedding-3-large (3072 dim)")
+        print("  3. text-embedding-ada-002 (1536 dim)")
+        model_choice = input("Choose model (1/2/3, default: 1): ").strip()
+        
+        model_map = {
+            "1": "text-embedding-3-small",
+            "2": "text-embedding-3-large",
+            "3": "text-embedding-ada-002"
+        }
+        embedding_model = model_map.get(model_choice, "text-embedding-3-small")
     
     # Show configuration
     print(f"\n{'='*80}")
@@ -885,6 +951,10 @@ def main():
     print(f"Main domains ({len(main_domains)}): {', '.join(main_domains)}")
     if proxy:
         print(f"Proxy: {proxy}")
+    if generate_embeddings:
+        print(f"Embeddings: Enabled (model: {embedding_model})")
+    else:
+        print(f"Embeddings: Disabled")
     print(f"Parsing strategy:")
     print(f"  - Homepage: Complete page including navbar")
     print(f"  - Other pages: page-body only (navbar ignored)")
@@ -904,7 +974,10 @@ def main():
         main_domains=main_domains,
         max_depth=max_depth,
         proxy=proxy, 
-        max_pages=max_pages
+        max_pages=max_pages, 
+        openai_api_key=openai_api_key,
+        embedding_model=embedding_model,
+        generate_embeddings=generate_embeddings
     )
     
     # Start crawling
