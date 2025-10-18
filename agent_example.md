@@ -413,3 +413,309 @@ You can insert these as mini-nodes before/after LLM calls to make the agent **co
 * **Reinforcement Learning** → ε-greedy bandit controlling `reasoning_style` and updating from the `reflect_node`’s score.
 
 If you want, I can tailor this skeleton to a **specific domain** (e.g., **RegTech**, **FinTech analytics**, **PDF extraction agents**) and swap in your real tools (databases, retrieval, calculators, web searchers) while keeping the same architecture.
+
+
+
+
+
+
+
+
+
+# How Search Works on a JSON File 🔍
+
+Great question! The search doesn’t query the JSON directly like a database. Instead, it uses a **two-phase approach**:
+
+## 📋 Phase 1: Crawling (Pre-computation)
+
+**During crawling**, embeddings are generated and **stored inside the JSON**:
+
+```python
+# In KnowledgeGraphCrawler.crawl()
+for url in queue:
+    # Extract page content
+    text = extract_page_body_content(soup)
+    
+    # Generate embedding (calls OpenAI API)
+    embedding = self.embedding_generator.generate_embedding(text)
+    # embedding = [0.023, -0.145, 0.087, ..., 0.012]  # 1536 floats
+    
+    # Store in graph node
+    self.graph.nodes[url]['embeddings'] = embedding
+    self.graph.nodes[url]['text'] = text
+    self.graph.nodes[url]['label'] = "Page Title"
+
+# Save entire graph to JSON
+graph.json = {
+    "nodes": [
+        {
+            "id": "https://example.com/401k",
+            "label": "401k Overview",
+            "text": "A 401k is a retirement account...",
+            "embeddings": [0.023, -0.145, ..., 0.012]  # ← Pre-computed!
+        },
+        {
+            "id": "https://example.com/roth",
+            "label": "Roth vs Traditional",
+            "text": "Roth contributions are after-tax...",
+            "embeddings": [0.031, -0.152, ..., 0.019]  # ← Pre-computed!
+        }
+        // ... 50 more pages
+    ],
+    "edges": [...],
+    "metadata": {...}
+}
+```
+
+**Key point:** The JSON file already contains ALL the embeddings. No database needed!
+
+## 🔎 Phase 2: Searching (In-Memory)
+
+**When searching**, the entire JSON is loaded into RAM:
+
+```python
+class GraphSimilaritySearch:
+    def load_graph(self):
+        # 1. Load entire JSON file into memory
+        with open('graph.json', 'r') as f:
+            self.graph_data = json.load(f)  # ← Full JSON in RAM
+        
+        # 2. Extract nodes with embeddings into a Python list
+        self.nodes_with_embeddings = []
+        for node in self.graph_data['nodes']:
+            if node.get('embeddings'):
+                self.nodes_with_embeddings.append(node)
+        
+        # Now we have a list like:
+        # [
+        #   {'url': '...', 'text': '...', 'embeddings': [...]},
+        #   {'url': '...', 'text': '...', 'embeddings': [...]},
+        #   ...
+        # ]
+```
+
+**When user queries:**
+
+```python
+def search_similar_nodes(self, query, top_k=5):
+    # 1. Generate embedding for the query (NEW API call)
+    query_embedding = self.embedding_generator.generate_embedding(query)
+    # query_embedding = [0.028, -0.141, ..., 0.015]
+    
+    # 2. Compare query embedding with ALL stored embeddings
+    results = []
+    
+    for node in self.nodes_with_embeddings:  # ← Loop through Python list
+        node_embedding = node['embeddings']  # ← Already in memory!
+        
+        # 3. Calculate cosine similarity (pure math, no API)
+        similarity = self.cosine_similarity(query_embedding, node_embedding)
+        # similarity = 0.87 (for example)
+        
+        results.append({
+            'url': node['url'],
+            'label': node['label'],
+            'similarity': similarity
+        })
+    
+    # 4. Sort by similarity and return top k
+    results.sort(key=lambda x: x['similarity'], reverse=True)
+    return results[:top_k]
+
+
+def cosine_similarity(self, vec1, vec2):
+    # Pure numpy math - no API calls, no database queries
+    vec1 = np.array(vec1)  # Convert list to numpy array
+    vec2 = np.array(vec2)
+    
+    # Cosine similarity formula
+    dot_product = np.dot(vec1, vec2)
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    
+    return dot_product / (norm1 * norm2)
+```
+
+## 📊 Complete Example
+
+Let’s trace a full search:
+
+### JSON File (graph.json)
+
+```json
+{
+  "nodes": [
+    {
+      "id": "https://myucretirement.com/401k",
+      "label": "401k Contribution Limits",
+      "text": "The 2024 401k contribution limit is $23,000...",
+      "embeddings": [0.023, -0.145, 0.087, ..., 0.012]  // 1536 numbers
+    },
+    {
+      "id": "https://myucretirement.com/roth",
+      "label": "Roth vs Traditional",
+      "text": "Roth contributions are made with after-tax dollars...",
+      "embeddings": [0.031, -0.152, 0.091, ..., 0.019]
+    },
+    {
+      "id": "https://myucretirement.com/catch-up",
+      "label": "Catch-up Contributions",
+      "text": "If you're 50 or older, you can contribute an extra $7,500...",
+      "embeddings": [0.027, -0.148, 0.089, ..., 0.014]
+    }
+  ]
+}
+```
+
+### Search Process
+
+```python
+# User query: "How much can I contribute to my 401k?"
+
+# Step 1: Load JSON (happens once at startup)
+graph_data = json.load(open('graph.json'))
+# graph_data is now a Python dictionary in RAM
+
+# Step 2: Generate query embedding (1 API call)
+query_emb = openai.embeddings.create(
+    model="text-embedding-3-small",
+    input="How much can I contribute to my 401k?"
+)
+# query_emb = [0.025, -0.147, 0.088, ..., 0.013]
+
+# Step 3: Compare with each node (NO API calls, pure math)
+similarities = []
+
+# Node 1: 401k Contribution Limits
+sim1 = cosine_similarity(
+    [0.025, -0.147, 0.088, ...],  # query
+    [0.023, -0.145, 0.087, ...]   # node 1
+)
+# sim1 = 0.92  ← Very similar!
+
+# Node 2: Roth vs Traditional
+sim2 = cosine_similarity(
+    [0.025, -0.147, 0.088, ...],  # query
+    [0.031, -0.152, 0.091, ...]   # node 2
+)
+# sim2 = 0.65  ← Somewhat related
+
+# Node 3: Catch-up Contributions
+sim3 = cosine_similarity(
+    [0.025, -0.147, 0.088, ...],  # query
+    [0.027, -0.148, 0.089, ...]   # node 3
+)
+# sim3 = 0.89  ← Also very similar!
+
+# Step 4: Sort and return
+results = [
+    {'label': '401k Contribution Limits', 'similarity': 0.92},
+    {'label': 'Catch-up Contributions', 'similarity': 0.89},
+    {'label': 'Roth vs Traditional', 'similarity': 0.65}
+]
+```
+
+## ⚡ Performance Characteristics
+
+### Why This Works Well
+
+**For small-to-medium knowledge graphs (< 10,000 pages):**
+
+```python
+# Example: 100 pages
+nodes_with_embeddings = 100
+
+# Search operation:
+for node in nodes_with_embeddings:  # 100 iterations
+    similarity = cosine_similarity(...)  # ~0.001ms per comparison
+    
+# Total time: 100 × 0.001ms = 0.1ms (instant!)
+```
+
+**Memory usage:**
+
+```python
+# Each embedding: 1536 floats × 4 bytes = 6KB
+# 100 pages: 100 × 6KB = 600KB
+# Plus text content: ~100KB per page = 10MB
+# Total: ~11MB in RAM (tiny!)
+```
+
+### When This Approach Breaks Down
+
+**Large scale (> 10,000 pages):**
+
+```python
+# 100,000 pages
+# Memory: 100,000 × 6KB = 600MB embeddings (still manageable)
+# Search time: 100,000 × 0.001ms = 100ms (starting to feel slow)
+```
+
+**At that scale, you’d use:**
+
+- **Vector databases** (Pinecone, Weaviate, Qdrant, ChromaDB)
+- **Approximate Nearest Neighbors** (FAISS, HNSW)
+- **Index structures** for O(log n) search instead of O(n)
+
+## 🔄 Why JSON Instead of a Database?
+
+### Advantages of JSON approach:
+
+✅ **Simple deployment** - No database setup  
+✅ **Portable** - Just copy one file  
+✅ **Version control** - Can commit to git  
+✅ **Fast for small graphs** - Everything in RAM  
+✅ **Easy to inspect** - Human-readable
+
+### When to switch to a database:
+
+❌ > 10,000 pages (slow search)  
+❌ Frequent updates (would need to regenerate entire JSON)  
+❌ Multiple users (concurrent access issues)  
+❌ Need complex queries (filtering, aggregation)
+
+## 💡 Alternative: Vector Database
+
+If you wanted to scale, you’d change the architecture:
+
+```python
+# Instead of JSON
+from pinecone import Pinecone
+
+# Store embeddings in vector DB
+pc = Pinecone(api_key="...")
+index = pc.Index("retirement-knowledge")
+
+# Upload during crawl
+index.upsert(vectors=[
+    {
+        "id": "page-1",
+        "values": [0.023, -0.145, ...],  # embedding
+        "metadata": {"url": "...", "title": "..."}
+    }
+])
+
+# Search (fast even with millions of vectors)
+results = index.query(
+    vector=query_embedding,
+    top_k=5
+)
+```
+
+## 🎯 Summary
+
+**The JSON approach works by:**
+
+1. **Pre-computing** embeddings during crawl (expensive)
+1. **Storing** them in JSON (one-time cost)
+1. **Loading** entire JSON into RAM (fast)
+1. **Comparing** query embedding with all stored embeddings (in-memory math)
+1. **No database needed** for small-to-medium graphs!
+
+**It’s fast because:**
+
+- Embeddings are pre-computed (not generated on each search)
+- Similarity is pure math (numpy vector operations)
+- Everything is in RAM (no disk I/O)
+
+**For this retirement planning use case (probably < 1000 pages), JSON is perfect!** 🎯​​​​​​​​​​​​​​​​
