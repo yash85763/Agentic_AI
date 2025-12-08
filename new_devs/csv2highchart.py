@@ -1,189 +1,326 @@
+# main.py
+
+# pip install fastapi python-dotenv langchain langchain-openai jinja2
+
 import os
+import re
 import json
-import pandas as pd
+import uuid
+import base64
+from fastapi import FastAPI, Request, HTTPException, Form, File, UploadFile, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from dotenv import load_dotenv
+import asyncio
+import logging
+from datetime import datetime, timezone
+
+# --- Imports for LangChain and OpenAI ---
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-class CSVToHighchartsBot:
-“””
-A chatbot that analyzes CSV data and recommends Highcharts configuration
-“””
+# Load environment variables from a .env file
+load_dotenv()
 
-```
-def __init__(self, api_key=None, model="gpt-4"):
+# --- Logger Setup ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- FastAPI App Setup ---
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+
+# --- In-memory store for task statuses ---
+task_store = {}
+
+# --- Simple In-Memory Conversation History ---
+# A dictionary to hold conversation history for each session
+conversation_histories = {}
+
+# --- System Prompt for the AI ---
+SYSTEM_PROMPT = """
+**Persona:**
+You are an expert web developer specializing in data visualization with Highcharts. Your code is clean, well-documented, and you prioritize creating responsive and visually appealing user interfaces.
+
+**Objective:**
+Based on the user's request, the conversation history, and any provided error feedback, create a single, self-contained, and responsive HTML file that renders the appropriate Highcharts chart.
+
+**Core Requirements:**
+1.  **Analyze the Request and Error:** Look at the user's latest request. Also, review the conversation history for context. If the user provides data, use it. If the user does not provide data, you MUST generate a realistic set of dummy data that fits the user's request. If there is error feedback, you MUST fix the previous code based on the error message. The goal is to produce a chart that renders without any JavaScript errors.
+2.  **Frameworks:** Use Highcharts for the charting library and Tailwind CSS for all styling.
+3.  **Output:** Generate a complete, runnable HTML file.
+
+**Implementation Steps:**
+1.  **HTML Structure:**
+    - Start with a standard HTML5 boilerplate.
+    - Set the viewport for responsive behavior.
+    - Include a `<script>` tag for the Tailwind CSS CDN.
+    - The `<body>` should have a neutral background color (e.g., `bg-gray-100`).
+    - Create a main container that centers the chart on the page with appropriate padding.
+    - Inside the main container, add a chart container `<div>` (e.g., `<div id="container"></div>`) and give it a white background, rounded corners, and a subtle box shadow.
+
+2.  **Highcharts Scripts (VERY IMPORTANT):**
+    - **The core `highcharts.js` script MUST be included BEFORE any other Highcharts module scripts** (like `sankey.js`, `exporting.js`, etc.). The order is critical.
+      **Always include the following Highcharts JavaScript libraries in this specific order**:
+        <script src="https://code.highcharts.com/highcharts.js"></script>
+        <script src="https://code.highcharts.com/highcharts-more.js"></script>
+        <script src="https://code.highcharts.com/highcharts-3d.js"></script>
+        <script src="https://code.highcharts.com/modules/stock.js"></script>
+        <script src="https://code.highcharts.com/maps/modules/map.js"></script>
+        <script src="https://code.highcharts.com/modules/gantt.js"></script>
+        <script src="https://code.highcharts.com/dashboards/datagrid.js"></script>
+        <script src="https://code.highcharts.com/dashboards/dashboards.js"></script>
+        <script src="https://code.highcharts.com/dashboards/modules/layout.js"></script>
+        <script src="https://code.highcharts.com/modules/exporting.js"></script>
+        <script src="https://code.highcharts.com/modules/parallel-coordinates.js"></script>
+        <script src="https://code.highcharts.com/modules/accessibility.js"></script>
+        <script src="https://code.highcharts.com/modules/annotations-advanced.js"></script>
+        <script src="https://code.highcharts.com/modules/data.js"></script>
+        <script src="https://code.highcharts.com/modules/draggable-points.js"></script>
+        <script src="https://code.highcharts.com/modules/static-scale.js"></script>
+        <script src="https://code.highcharts.com/modules/broken-axis.js"></script>
+        <script src="https://code.highcharts.com/modules/heatmap.js"></script>
+        <script src="https://code.highcharts.com/modules/tilemap.js"></script>
+        <script src="https://code.highcharts.com/modules/timeline.js"></script>
+        <script src="https://code.highcharts.com/modules/treemap.js"></script>
+        <script src="https://code.highcharts.com/modules/treegraph.js"></script>
+        <script src="https://code.highcharts.com/modules/item-series.js"></script>
+        <script src="https://code.highcharts.com/modules/drilldown.js"></script>
+        <script src="https://code.highcharts.com/modules/histogram-bellcurve.js"></script>
+        <script src="https://code.highcharts.com/modules/bullet.js"></script>
+        <script src="https://code.highcharts.com/modules/funnel.js"></script>
+        <script src="https://code.highcharts.com/modules/funnel3d.js"></script>
+        <script src="https://code.highcharts.com/modules/pyramid3d.js"></script>
+        <script src="https://code.highcharts.com/modules/networkgraph.js"></script>
+        <script src="https://code.highcharts.com/modules/pareto.js"></script>
+        <script src="https://code.highcharts.com/modules/pattern-fill.js"></script>
+        <script src="https://code.highcharts.com/modules/price-indicator.js"></script>
+        <script src="https://code.highcharts.com/modules/sankey.js"></script>
+        <script src="https://code.highcharts.com/modules/arc-diagram.js"></script>
+        <script src="https://code.highcharts.com/modules/dependency-wheel.js"></script>
+        <script src="https://code.highcharts.com/modules/series-label.js"></script>
+        <script src="https://code.highcharts.com/modules/solid-gauge.js"></script>
+        <script src="https://code.highcharts.com/modules/sonification.js"></script>
+        <script src="https://code.highcharts.com/modules/streamgraph.js"></script>
+        <script src="https://code.highcharts.com/modules/sunburst.js"></script>
+        <script src="https://code.highcharts.com/modules/variable-pie.js"></script>
+        <script src="https://code.highcharts.com/modules/variwide.js"></script>
+        <script src="https://code.highcharts.com/modules/vector.js"></script>
+        <script src="https://code.highcharts.com/modules/venn.js"></script>
+        <script src="https://code.highcharts.com/modules/windbarb.js"></script>
+        <script src="https://code.highcharts.com/modules/wordcloud.js"></script>
+        <script src="https://code.highcharts.com/modules/xrange.js"></script>
+        <script src="https://code.highcharts.com/modules/no-data-to-display.js"></script>
+        <script src="https://code.highcharts.com/modules/drag-panes.js"></script>
+        <script src="https://code.highcharts.com/modules/debugger.js"></script>
+        <script src="https://code.highcharts.com/modules/dumbbell.js"></script>
+        <script src="https://code.highcharts.com/modules/lollipop.js"></script>
+        <script src="https://code.highcharts.com/modules/cylinder.js"></script>
+        <script src="https://code.highcharts.com/modules/organization.js"></script>
+        <script src="https://code.highcharts.com/modules/dotplot.js"></script>
+        <script src="https://code.highcharts.com/modules/marker-clusters.js"></script>
+        <script src="https://code.highcharts.com/modules/hollowcandlestick.js"></script>
+        <script src="https://code.highcharts.com/modules/heikinashi.js"></script>
+        <script src="https://code.highcharts.com/modules/full-screen.js"></script>
+
+    - Include the minimum necessary Highcharts modules from their official CDN to render the specified chart. You MUST determine which modules are needed based on the requested chart type. For example, a Sankey diagram requires the 'sankey.js' module. Always include 'exporting.js' and 'accessibility.js'.
+
+
+3.  **Highcharts Configuration (in a `<script>` tag):**
+- Wait for the DOM to be fully loaded before initializing the chart.
+    - `title`: Set an appropriate title for the chart based on the user's request.
+    - `series`:
+        * Set the 'type' to the lowercase version of the chart type (e.g., 'sankey', 'pie').
+        * Provide a name for the series.
+        * Use the provided data (or the dummy data you generated), ensuring it's correctly parsed.
+        * Set the `keys` property appropriately based on the data structure.
+    - `tooltip`: Customize the tooltip to display data points in a a clear and meaningful way.
+    - `credits`: Disable the Highcharts.com credits.
+
+4.  **Error Correction Logic:**
+    - If there is any `error_feedback`, **You must fix the script loading order.**
+
+5.  **Code Quality:**
+    - Add comments to both the HTML and JavaScript sections to explain the structure, styling, and Highcharts configuration.
+    - Ensure the code is correctly formatted and indented.
+    - Respond ONLY with the raw HTML code. Do NOT include backticks, "html" markers, or any commentary. The response must start with `<!DOCTYPE html>`.
+"""
+
+
+async def run_generation_in_background(task_id: str, session_id: str, prompt: str, error_feedback: str | None, image_bytes: bytes | None, mime_type: str | None):
     """
-    Initialize the chatbot with LangChain LLM
-    
+    Handles the core AI chart generation logic in a background task.
+
+    This function constructs the full prompt for the LLM, including the system
+    prompt, conversation history, the user's request, and any error feedback from
+    a previous attempt. It then invokes the OpenAI model, processes the response,
+    updates the conversation history, and stores the final result or error in the
+    global `task_store`.
+
     Args:
-        api_key: OpenAI API key (or set OPENAI_API_KEY env variable)
-        model: Model to use (default: gpt-4, can use gpt-3.5-turbo for cheaper option)
+        task_id: The unique identifier for this generation task.
+        session_id: The identifier for the user's current session.
+        prompt: The user's text prompt for the chart.
+        error_feedback: Optional error message from a previous failed generation attempt.
+        image_bytes: Optional bytes of an uploaded image (currently unused).
+        mime_type: Optional MIME type of the uploaded image (currently unused).
     """
-    # Set API key
-    if api_key:
+    try:
+        # --- Get conversation history from memory ---
+        conversation_history_messages = conversation_histories.get(session_id, [])
+        
+        # --- Construct the message list for the LLM ---
+        messages_for_llm = [SystemMessage(content=SYSTEM_PROMPT)]
+        messages_for_llm.extend(conversation_history_messages)
+        
+        # Combine the user's prompt and any error feedback into the final message
+        current_user_prompt = prompt
+        if error_feedback:
+            current_user_prompt += f"\n\n--- PREVIOUS ERROR ---\nPlease fix the code based on the following error:\n{error_feedback}"
+        
+        messages_for_llm.append(HumanMessage(content=current_user_prompt))
+
+        # --- Initialize LLM and make the call ---
+        logger.info("Invoking OpenAI for content generation...")
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        base_url = ""
+        model = "gpt-4.1-2025-04-14"
+
+        os.environ["OPENAI_API_BASE"] = base_url
         os.environ["OPENAI_API_KEY"] = api_key
-    
-    # Initialize LLM
-    self.llm = ChatOpenAI(
-        model=model,
-        temperature=0.3,  # Lower temperature for more consistent JSON output
-    )
-    
-    # Create the prompt template
-    self.prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a data visualization expert. Your task is to analyze CSV data 
-        and recommend the best Highcharts configuration for visualizing it.
         
-        You must return ONLY valid JSON in this exact format:
-        {{
-            "chartType": "line|bar|column|pie|scatter|area|etc",
-            "reasoning": "Brief explanation of why this chart type is best",
-            "highchartsConfig": {{
-                // Complete Highcharts configuration object
-            }}
-        }}
+        llm = ChatOpenAI(temperature=0, model_name=model)
         
-        Consider:
-        - Data types (numeric, categorical, time-series)
-        - Number of series
-        - Data distribution
-        - Best practices for data visualization
+        response = await llm.ainvoke(messages_for_llm)
+        generated_html = response.content
+
+        # --- Update conversation memory ---
+        conversation_histories[session_id] = conversation_history_messages + [
+            HumanMessage(content=prompt),
+            AIMessage(content=generated_html)
+        ]
+
+        # --- Process and store the result ---
+        html_match = re.search(r'<!DOCTYPE html>', generated_html, re.IGNORECASE | re.DOTALL)
+        if html_match:
+            start_index = html_match.start()
+            cleaned_html = generated_html[start_index:].strip()
+        else:
+            cleaned_html = generated_html.strip().removeprefix('```html').removesuffix('```').strip()
         
-        Return ONLY the JSON, no markdown code blocks or extra text."""),
-        ("human", """Here is the CSV data:
-```
-
-Column Names: {columns}
-Data Types: {dtypes}
-Sample Data (first 5 rows):
-{sample_data}
-
-Full Data Summary:
-{data_summary}
-
-Please analyze this data and provide the best Highcharts configuration as JSON.”””)
-])
-
-```
-def read_csv(self, csv_path):
-    """
-    Read and analyze CSV file
-    
-    Args:
-        csv_path: Path to CSV file
-        
-    Returns:
-        pandas DataFrame
-    """
-    try:
-        df = pd.read_csv(csv_path)
-        return df
+        task_store[task_id] = {
+            "status": "SUCCESS",
+            "result": {
+                "html_code": cleaned_html,
+                "original_prompt": prompt 
+            }
+        }
     except Exception as e:
-        raise Exception(f"Error reading CSV: {str(e)}")
+        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        task_store[task_id] = {"status": "FAILED", "result": {"detail": str(e)}}
 
-def analyze_csv(self, csv_path):
+
+# --- API Endpoints ---
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
     """
-    Main function to analyze CSV and get Highcharts config
-    
+    Serves the main single-page application `index.html`.
+
     Args:
-        csv_path: Path to CSV file
-        
+        request: The incoming FastAPI request object.
+
     Returns:
-        dict: JSON response with chart type, reasoning, and Highcharts config
+        A TemplateResponse that renders the main HTML page.
     """
-    # Read CSV
-    df = self.read_csv(csv_path)
-    
-    # Prepare data summary
-    columns = list(df.columns)
-    dtypes = df.dtypes.to_dict()
-    dtypes_str = {k: str(v) for k, v in dtypes.items()}
-    sample_data = df.head(5).to_string()
-    data_summary = df.describe(include='all').to_string()
-    
-    # Create the prompt
-    formatted_prompt = self.prompt.format_messages(
-        columns=columns,
-        dtypes=dtypes_str,
-        sample_data=sample_data,
-        data_summary=data_summary
-    )
-    
-    # Get response from LLM
-    response = self.llm.invoke(formatted_prompt)
-    
-    # Parse JSON response
-    try:
-        # Clean the response (remove markdown code blocks if present)
-        content = response.content.strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        
-        result = json.loads(content)
-        return result
-    except json.JSONDecodeError as e:
-        print("Raw response:", response.content)
-        raise Exception(f"Failed to parse JSON response: {str(e)}")
+    return templates.TemplateResponse("index.html", {"request": request})
 
-def save_result(self, result, output_path="highcharts_config.json"):
+@app.post("/api/generate")
+async def generate_chart_request(
+    background_tasks: BackgroundTasks,
+    prompt: str = Form(...),
+    session_id: str = Form(...),
+    error_feedback: str | None = Form(None),
+    file: UploadFile | None = File(None)
+):
     """
-    Save the result to a JSON file
-    
+    Accepts a chart generation request and starts it as a background task.
+
+    This endpoint immediately returns a task ID to the client, allowing the
+    long-running AI generation process to run in the background without blocking
+    the response. The client can then use the task ID to poll for the result.
+
     Args:
-        result: Dictionary containing the Highcharts config
-        output_path: Path to save the JSON file
+        background_tasks: FastAPI dependency to schedule background tasks.
+        prompt: The user's text prompt for the chart.
+        session_id: The identifier for the user's session.
+        error_feedback: Optional error string from a previous attempt.
+        file: Optional uploaded file (currently unused).
+
+    Returns:
+        A JSONResponse with the unique task_id and a 202 Accepted status code.
     """
-    with open(output_path, 'w') as f:
-        json.dump(result, f, indent=2)
-    print(f"✓ Highcharts configuration saved to: {output_path}")
-```
+    task_id = str(uuid.uuid4())
+    image_bytes = await file.read() if file else None
+    mime_type = file.content_type if file else None
 
-# Example usage
+    task_store[task_id] = {"status": "PENDING", "result": None}
+    background_tasks.add_task(
+        run_generation_in_background,
+        task_id=task_id,
+        session_id=session_id,
+        prompt=prompt,
+        error_feedback=error_feedback,
+        image_bytes=image_bytes,
+        mime_type=mime_type
+    )
 
-if **name** == “**main**”:
-# Example 1: Create sample CSV for demonstration
-print(“Creating sample CSV data…”)
-sample_data = pd.DataFrame({
-‘Month’: [‘Jan’, ‘Feb’, ‘Mar’, ‘Apr’, ‘May’, ‘Jun’],
-‘Sales’: [1200, 1900, 1500, 2100, 2400, 2000],
-‘Expenses’: [800, 1100, 900, 1300, 1500, 1200]
-})
-sample_data.to_csv(‘sample_data.csv’, index=False)
-print(“✓ Sample CSV created: sample_data.csv\n”)
+    return JSONResponse(content={"task_id": task_id}, status_code=202)
 
-```
-# Initialize the chatbot
-# Option 1: Pass API key directly
-# bot = CSVToHighchartsBot(api_key="your-api-key-here")
+@app.post("/api/reset")
+async def reset_memory(session_id: str = Form(...)):
+    """
+    Resets and clears the conversation memory for a given session ID.
 
-# Option 2: Use environment variable (recommended)
-# Set OPENAI_API_KEY in your environment
-bot = CSVToHighchartsBot(model="gpt-4")
+    This allows a user to start a new conversation from scratch without
+    the AI being influenced by previous requests in the same session.
 
-# Analyze CSV and get Highcharts config
-print("Analyzing CSV data...")
-try:
-    result = bot.analyze_csv('sample_data.csv')
+    Args:
+        session_id: The session identifier to be cleared.
+
+    Returns:
+        A JSONResponse confirming success or indicating that the session was not found.
+    """
+    if session_id in conversation_histories:
+        del conversation_histories[session_id]
+        logger.info(f"Memory for session {session_id} has been cleared.")
+        return JSONResponse(content={"message": "Memory cleared successfully."})
+    else:
+        logger.warning(f"No memory found for session {session_id} to clear.")
+        return JSONResponse(content={"message": "No active session to clear."}, status_code=404)
+
+
+
+@app.get("/api/status/{task_id}")
+async def get_task_status(task_id: str):
+    """
+    Allows the client to poll for the status of a background generation task.
+
+    The frontend uses this endpoint to check if the chart generation is
+    'PENDING', 'SUCCESS', or 'FAILED'.
+
+    Args:
+        task_id: The unique identifier of the task being polled.
+
+    Returns:
+        A JSONResponse containing the current status and result of the task.
+        Raises an HTTPException with a 404 status if the task is not found.
+    """
+    task = task_store.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse(content=task)
     
-    # Display results
-    print("\n" + "="*60)
-    print("ANALYSIS RESULTS")
-    print("="*60)
-    print(f"\nRecommended Chart Type: {result['chartType']}")
-    print(f"\nReasoning: {result['reasoning']}")
-    print("\nHighcharts Configuration:")
-    print(json.dumps(result['highchartsConfig'], indent=2))
     
-    # Save to file
-    bot.save_result(result)
-    
-except Exception as e:
-    print(f"Error: {str(e)}")
-    print("\nMake sure to set your OPENAI_API_KEY environment variable!")
-    print("Example: export OPENAI_API_KEY='your-key-here'")
-```
