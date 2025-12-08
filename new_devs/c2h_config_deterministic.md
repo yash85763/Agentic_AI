@@ -1,753 +1,372 @@
-# Best Solution for Highcharts Config Generation
+'''html
 
-You’re right to separate this as the final, deterministic step. Let me show you the **best practical approach** that balances simplicity with robustness.
+# templates/index.html
 
------
-
-## The Problem Breakdown
-
-When generating a Highcharts config, you need to handle:
-
-1. **Different data structures per chart type**
-
-- Line chart: `series: [{data: [[x, y], [x, y]]}]`
-- Pie chart: `series: [{data: [{name: 'A', y: 10}]}]`
-- Heatmap: `series: [{data: [[x, y, value]]}]`
-
-1. **Data transformations**
-
-- Aggregation (sum, average, count)
-- Pivoting (wide to long format)
-- Filtering (top N, date ranges)
-- Sorting
-
-1. **Edge cases**
-
-- Too many categories (>50) → sample or group “Others”
-- Missing values → how to handle nulls
-- Large datasets (>1000 points) → enable boost module
-- Mixed data types → coerce or filter
-
-1. **Highcharts-specific requirements**
-
-- DateTime axis needs timestamps or formatted dates
-- Categories array vs. numeric axis
-- Multiple series handling
-
------
-
-## Best Solution: Schema-Driven Config Builder
-
-Instead of simple placeholders, use a **data schema** that defines how to transform CSV → Highcharts format for each chart type.
-
------
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Input:                                                  │
-│  - chart_type: "line"                                    │
-│  - data: DataFrame                                       │
-│  - mapping: {x: "date", y: "revenue", series: "category"}│
-│  - options: {aggregate: "sum", top_n: 20}               │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  Chart Schema Loader                                     │
-│  Load chart-specific schema from schemas/line.json      │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  Data Transformer                                        │
-│  Transform DataFrame based on schema requirements        │
-│  - Apply aggregations                                    │
-│  - Handle missing data                                   │
-│  - Sort/filter                                           │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  Config Builder                                          │
-│  Build Highcharts config using transformed data         │
-│  - Load base template                                    │
-│  - Insert data in correct format                         │
-│  - Apply edge case handlers                              │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  Validator                                               │
-│  Validate against Highcharts schema                      │
-│  - Check required fields                                 │
-│  - Validate data types                                   │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-                 Valid Highcharts Config
-```
-
------
-
-## Component 1: Chart Schemas (Not Just Templates)
-
-Instead of templates with placeholders, define **schemas** that describe data requirements and transformations:
-
-### `schemas/line.json`
-
-```json
-{
-  "chart_type": "line",
-  "highcharts_type": "line",
-  "description": "Line chart for temporal or sequential data",
-  
-  "data_requirements": {
-    "x_axis": {
-      "required": true,
-      "types": ["temporal", "numeric", "sequential"],
-      "role": "independent"
-    },
-    "y_axis": {
-      "required": true,
-      "types": ["numeric"],
-      "role": "dependent"
-    },
-    "series_by": {
-      "required": false,
-      "types": ["categorical"],
-      "max_categories": 20,
-      "role": "grouping"
-    }
-  },
-  
-  "data_transformations": {
-    "sort_by": "x_axis",
-    "sort_order": "ascending",
-    "handle_nulls": "connect",  // or "break", "zero"
-    "aggregation": {
-      "group_by": ["x_axis", "series_by"],
-      "aggregate": "sum",  // default, can be overridden
-      "agg_column": "y_axis"
-    }
-  },
-  
-  "data_format": {
-    "series_structure": "array_of_series",
-    "data_point_format": "tuple",  // [x, y] format
-    "x_format": "auto"  // "datetime", "category", "numeric"
-  },
-  
-  "config_template": {
-    "chart": {
-      "type": "line",
-      "zoomType": "x"
-    },
-    "xAxis": {
-      "type": "{{x_axis_type}}",
-      "categories": "{{x_categories}}",  // if categorical
-      "title": {"text": "{{x_title}}"}
-    },
-    "yAxis": {
-      "title": {"text": "{{y_title}}"}
-    },
-    "series": "{{series_data}}",
-    "plotOptions": {
-      "line": {
-        "marker": {"enabled": false}
-      }
-    }
-  },
-  
-  "edge_case_handlers": {
-    "too_many_points": {
-      "threshold": 1000,
-      "action": "enable_boost"
-    },
-    "too_many_series": {
-      "threshold": 10,
-      "action": "warn_user"
-    }
-  }
-}
-```
-
-### `schemas/bar.json`
-
-```json
-{
-  "chart_type": "bar",
-  "highcharts_type": "bar",
-  
-  "data_requirements": {
-    "x_axis": {
-      "required": true,
-      "types": ["categorical"],
-      "role": "independent"
-    },
-    "y_axis": {
-      "required": true,
-      "types": ["numeric"],
-      "role": "dependent"
-    }
-  },
-  
-  "data_transformations": {
-    "sort_by": "y_axis",
-    "sort_order": "descending",
-    "aggregation": {
-      "group_by": ["x_axis"],
-      "aggregate": "sum",
-      "agg_column": "y_axis"
-    },
-    "top_n": 20
-  },
-  
-  "data_format": {
-    "series_structure": "single_series",
-    "data_point_format": "value_only"  // just y values
-  },
-  
-  "config_template": {
-    "chart": {"type": "bar"},
-    "xAxis": {
-      "categories": "{{x_categories}}",
-      "title": {"text": null}
-    },
-    "yAxis": {
-      "title": {"text": "{{y_title}}"}
-    },
-    "series": [{
-      "name": "{{y_title}}",
-      "data": "{{y_values}}"
-    }],
-    "legend": {"enabled": false}
-  },
-  
-  "edge_case_handlers": {
-    "too_many_categories": {
-      "threshold": 30,
-      "action": "take_top_n_and_group_rest"
-    }
-  }
-}
-```
-
-### `schemas/pie.json`
-
-```json
-{
-  "chart_type": "pie",
-  "highcharts_type": "pie",
-  
-  "data_requirements": {
-    "name_field": {
-      "required": true,
-      "types": ["categorical"],
-      "max_categories": 7
-    },
-    "value_field": {
-      "required": true,
-      "types": ["numeric"]
-    }
-  },
-  
-  "data_transformations": {
-    "sort_by": "value_field",
-    "sort_order": "descending",
-    "aggregation": {
-      "group_by": ["name_field"],
-      "aggregate": "sum",
-      "agg_column": "value_field"
-    },
-    "top_n": 7
-  },
-  
-  "data_format": {
-    "series_structure": "single_series",
-    "data_point_format": "name_value_object"  // {name: 'X', y: 10}
-  },
-  
-  "config_template": {
-    "chart": {"type": "pie"},
-    "title": {"text": "{{title}}"},
-    "series": [{
-      "name": "{{series_name}}",
-      "data": "{{pie_data}}"
-    }],
-    "plotOptions": {
-      "pie": {
-        "dataLabels": {
-          "enabled": true,
-          "format": "{point.name}: {point.percentage:.1f}%"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Highcharts Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="icon" href="/static/icon/favicon.ico" type="image/x-icon">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc; /* A very light gray, almost white */
         }
-      }
-    }
-  },
-  
-  "edge_case_handlers": {
-    "too_many_slices": {
-      "threshold": 7,
-      "action": "group_smallest_as_other"
-    }
-  }
-}
-```
 
------
+        #output-iframe {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #e2e8f0; /* Lighter border */
+            border-radius: 0.5rem;
+        }
 
-## Component 2: Data Transformer
+        /* Toast Notification Styles */
+        #toast-container {
+            position: fixed;
+            top: 1.5rem;
+            right: 1.5rem;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
 
-This component reads the schema and transforms the DataFrame accordingly:
+        .toast {
+            display: flex;
+            align-items: center;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transform: translateX(100%);
+            opacity: 0;
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+        }
 
-```python
-class DataTransformer:
-    def __init__(self, schema):
-        self.schema = schema
-    
-    def transform(self, df, column_mapping):
-        """
-        Transform DataFrame according to schema requirements
-        
-        Args:
-            df: pandas DataFrame
-            column_mapping: {
-                "x_axis": "date",
-                "y_axis": "revenue", 
-                "series_by": "category"
-            }
-        
-        Returns:
-            Transformed DataFrame ready for config building
-        """
-        # Step 1: Extract relevant columns
-        df = self._extract_columns(df, column_mapping)
-        
-        # Step 2: Handle nulls
-        df = self._handle_nulls(df)
-        
-        # Step 3: Apply aggregations if specified
-        if "aggregation" in self.schema["data_transformations"]:
-            df = self._aggregate(df, column_mapping)
-        
-        # Step 4: Sort
-        df = self._sort(df, column_mapping)
-        
-        # Step 5: Apply top_n filtering if specified
-        if "top_n" in self.schema["data_transformations"]:
-            df = self._apply_top_n(df, column_mapping)
-        
-        # Step 6: Handle edge cases
-        df = self._handle_edge_cases(df, column_mapping)
-        
-        return df
-    
-    def _extract_columns(self, df, mapping):
-        """Extract only the columns we need"""
-        needed_cols = [col for col in mapping.values() if col]
-        return df[needed_cols].copy()
-    
-    def _handle_nulls(self, df):
-        """Handle null values based on schema"""
-        null_strategy = self.schema["data_transformations"].get("handle_nulls", "drop")
-        
-        if null_strategy == "drop":
-            return df.dropna()
-        elif null_strategy == "zero":
-            return df.fillna(0)
-        elif null_strategy == "connect":
-            # For line charts, keep nulls (Highcharts will connect)
-            return df
-        
-        return df
-    
-    def _aggregate(self, df, mapping):
-        """Apply aggregation as specified in schema"""
-        agg_config = self.schema["data_transformations"]["aggregation"]
-        
-        group_by_cols = [
-            mapping[field] 
-            for field in agg_config["group_by"] 
-            if field in mapping and mapping[field]
-        ]
-        
-        agg_column = mapping[agg_config["agg_column"]]
-        agg_func = agg_config["aggregate"]
-        
-        if not group_by_cols:
-            # No grouping needed
-            return df
-        
-        # Perform aggregation
-        grouped = df.groupby(group_by_cols, as_index=False)[agg_column].agg(agg_func)
-        
-        return grouped
-    
-    def _sort(self, df, mapping):
-        """Sort data as specified in schema"""
-        sort_config = self.schema["data_transformations"]
-        sort_by_field = sort_config.get("sort_by")
-        sort_order = sort_config.get("sort_order", "ascending")
-        
-        if not sort_by_field:
-            return df
-        
-        sort_column = mapping.get(sort_by_field)
-        if not sort_column or sort_column not in df.columns:
-            return df
-        
-        ascending = (sort_order == "ascending")
-        return df.sort_values(sort_column, ascending=ascending)
-    
-    def _apply_top_n(self, df, mapping):
-        """Take top N rows"""
-        top_n = self.schema["data_transformations"].get("top_n")
-        if top_n and len(df) > top_n:
-            return df.head(top_n)
-        return df
-    
-    def _handle_edge_cases(self, df, mapping):
-        """Handle edge cases like too many categories"""
-        handlers = self.schema.get("edge_case_handlers", {})
-        
-        # Too many categories
-        if "too_many_categories" in handlers:
-            threshold = handlers["too_many_categories"]["threshold"]
-            x_col = mapping.get("x_axis")
-            
-            if x_col and x_col in df.columns and len(df) > threshold:
-                action = handlers["too_many_categories"]["action"]
-                if action == "take_top_n_and_group_rest":
-                    df = self._group_others(df, x_col, threshold)
-        
-        return df
-    
-    def _group_others(self, df, category_col, top_n):
-        """Group smallest categories into 'Others'"""
-        top_categories = df.nlargest(top_n - 1, df.columns[-1])
-        
-        # Sum all other rows
-        others_sum = df.iloc[top_n-1:].sum(numeric_only=True)
-        others_row = pd.DataFrame([{
-            category_col: "Others",
-            **{col: others_sum[col] for col in df.columns if col != category_col}
-        }])
-        
-        return pd.concat([top_categories, others_row], ignore_index=True)
-```
+        .toast.show {
+            transform: translateX(0);
+            opacity: 1;
+        }
 
------
+        .toast-success {
+            background-color: #dcfce7; /* Green-100 */
+            color: #166534; /* Green-800 */
+        }
 
-## Component 3: Config Builder
+        .toast-error {
+            background-color: #fee2e2; /* Red-100 */
+            color: #991b1b; /* Red-800 */
+        }
+        
+        .toast-info {
+             background-color: #e0f2fe; /* Sky-100 */
+             color: #075985; /* Sky-800 */
+        }
 
-This takes transformed data and builds the Highcharts config:
+        .toast svg {
+            flex-shrink: 0;
+            width: 1.25rem;
+            height: 1.25rem;
+            margin-right: 0.75rem;
+        }
+    </style>
+</head>
+<body class="text-gray-800">
 
-```python
-class HighchartsConfigBuilder:
-    def __init__(self, schema):
-        self.schema = schema
-    
-    def build(self, transformed_df, column_mapping, options=None):
-        """
-        Build Highcharts config from transformed data
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl h-screen flex flex-col">
+
+        <main id="output-section" class="flex-grow overflow-y-auto hidden">
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 h-full flex flex-col">
+                <div class="flex-shrink-0 flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold text-gray-900">Generated Chart</h2>
+                    <button id="save-html-btn" class="bg-blue-600 text-white font-semibold py-1.5 px-3 rounded-lg hover:bg-blue-700 flex items-center text-sm transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 mr-2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                        Save as HTML
+                    </button>
+                </div>
+                <div class="flex-grow">
+                    <iframe id="output-iframe" title="Generated Highcharts Chart"></iframe>
+                </div>
+            </div>
+        </main>
+
+        <main id="placeholder-section" class="flex-grow flex items-center justify-center">
+            <div class="text-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-24 w-24 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
+                </svg>
+                <h2 class="mt-4 text-2xl font-bold text-gray-600">Your chart will appear here</h2>
+                <p class="text-gray-500">Enter a description below and click the send button to get started.</p>
+            </div>
+        </main>
+
+        <footer class="flex-shrink-0 pt-4">
+             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                <div class="flex items-center space-x-4">
+                    <div class="relative flex-grow">
+                        <textarea id="prompt-input" rows="3" class="w-full p-3 pr-16 border border-gray-300 bg-white text-gray-900 rounded-lg focus:ring-2 focus:ring-indigo-500 transition-shadow duration-200 resize-none placeholder-gray-500" placeholder="e.g., A donut chart of top 5 car manufacturers"></textarea>
+                        <button id="generate-btn" class="absolute right-3 top-1/2 -translate-y-1/2 bg-indigo-600 text-white font-semibold p-2 rounded-lg hover:bg-indigo-700 flex items-center justify-center transition-colors disabled:bg-indigo-400 disabled:cursor-not-allowed">
+                            <span id="btn-text" class="hidden">Generate</span> 
+                            <svg id="send-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.428A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                            </svg>
+                            <svg id="loader" class="animate-spin h-6 w-6 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        </button>
+                    </div>
+                    <button id="reset-btn" class="bg-red-600 text-white font-semibold p-2 rounded-lg hover:bg-red-700 flex items-center justify-center transition-colors disabled:bg-red-400 disabled:cursor-not-allowed" title="Reset Conversation Memory">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5" />
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M4 9a9 9 0 0114.13-6.364M20 15a9 9 0 01-14.13 6.364" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+             <p id="generation-notice" class="text-xs text-gray-500 text-center mt-2 hidden">
+                Chart generation can sometimes take over a minute. Please be patient.
+             </p>
+        </footer>
         
-        Args:
-            transformed_df: Transformed DataFrame
-            column_mapping: Original column mapping
-            options: User preferences (colors, titles, etc.)
-        
-        Returns:
-            Complete Highcharts config dict
-        """
-        options = options or {}
-        
-        # Start with template
-        config = copy.deepcopy(self.schema["config_template"])
-        
-        # Build series data based on chart type
-        series_data = self._build_series_data(transformed_df, column_mapping)
-        
-        # Replace placeholders in config
-        config = self._populate_config(config, series_data, column_mapping, options)
-        
-        # Apply edge case configurations
-        config = self._apply_edge_case_configs(config, transformed_df, series_data)
-        
-        # Apply user preferences
-        if options.get("colors"):
-            config["colors"] = options["colors"]
-        
-        return config
-    
-    def _build_series_data(self, df, mapping):
-        """Build series data in format required by chart type"""
-        data_format = self.schema["data_format"]
-        structure = data_format["series_structure"]
-        
-        if structure == "array_of_series":
-            # Line chart with multiple series
-            return self._build_multi_series(df, mapping, data_format)
-        
-        elif structure == "single_series":
-            # Bar/column chart
-            return self._build_single_series(df, mapping, data_format)
-        
-        return []
-    
-    def _build_multi_series(self, df, mapping, data_format):
-        """Build multiple series (for line charts, multi-bar, etc.)"""
-        x_col = mapping["x_axis"]
-        y_col = mapping["y_axis"]
-        series_by = mapping.get("series_by")
-        
-        point_format = data_format["data_point_format"]
-        
-        if series_by and series_by in df.columns:
-            # Multiple series
-            series_list = []
-            
-            for series_name in df[series_by].unique():
-                series_df = df[df[series_by] == series_name]
+        <div id="error-message" class="mt-8 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative hidden" role="alert">
+            <strong class="font-bold">Error:</strong> <span class="block sm:inline" id="error-text"></span>
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- UI Elements ---
+            const generateBtn = document.getElementById('generate-btn');
+            const resetBtn = document.getElementById('reset-btn');
+            const btnText = document.getElementById('btn-text');
+            const loader = document.getElementById('loader');
+            const sendIcon = document.getElementById('send-icon');
+            const promptInput = document.getElementById('prompt-input');
+            const outputSection = document.getElementById('output-section');
+            const placeholderSection = document.getElementById('placeholder-section');
+            const outputIframe = document.getElementById('output-iframe');
+            const errorMessage = document.getElementById('error-message');
+            const errorText = document.getElementById('error-text');
+            const generationNotice = document.getElementById('generation-notice');
+            const toastContainer = document.getElementById('toast-container');
+
+            // --- State Variables ---
+            let sessionId = uuidv4();
+            const MAX_ATTEMPTS = 3; 
+            const POLLING_INTERVAL = 2500; 
+
+            // --- Toast Notification Function ---
+            const showToast = (message, type = 'info', duration = 3000) => {
+                const toast = document.createElement('div');
+                toast.className = `toast toast-${type}`;
                 
-                if point_format == "tuple":
-                    # [[x, y], [x, y]] format
-                    data = series_df[[x_col, y_col]].values.tolist()
-                else:
-                    # [{x: ..., y: ...}] format
-                    data = series_df[[x_col, y_col]].to_dict('records')
-                
-                series_list.append({
-                    "name": str(series_name),
-                    "data": data
-                })
-            
-            return series_list
-        
-        else:
-            # Single series
-            if point_format == "tuple":
-                data = df[[x_col, y_col]].values.tolist()
-            else:
-                data = df[[x_col, y_col]].to_dict('records')
-            
-            return [{
-                "name": y_col,
-                "data": data
-            }]
-    
-    def _build_single_series(self, df, mapping, data_format):
-        """Build single series (for bar, column, pie)"""
-        point_format = data_format["data_point_format"]
-        
-        if point_format == "name_value_object":
-            # Pie chart format: [{name: 'X', y: 10}]
-            x_col = mapping.get("name_field") or mapping.get("x_axis")
-            y_col = mapping.get("value_field") or mapping.get("y_axis")
-            
-            data = [
-                {"name": str(row[x_col]), "y": float(row[y_col])}
-                for _, row in df.iterrows()
-            ]
-            
-            return [{
-                "name": y_col,
-                "data": data
-            }]
-        
-        elif point_format == "value_only":
-            # Bar chart format: just array of values
-            y_col = mapping["y_axis"]
-            return [{
-                "name": y_col,
-                "data": df[y_col].tolist()
-            }]
-        
-        return []
-    
-    def _populate_config(self, config, series_data, mapping, options):
-        """Replace placeholders in config with actual data"""
-        
-        # Replace series
-        if "{{series_data}}" in str(config):
-            config["series"] = series_data
-        elif isinstance(config.get("series"), list) and len(config["series"]) > 0:
-            if "{{pie_data}}" in str(config["series"]):
-                config["series"][0]["data"] = series_data[0]["data"]
-            elif "{{y_values}}" in str(config["series"]):
-                config["series"][0]["data"] = series_data[0]["data"]
-        
-        # Replace axis info
-        x_col = mapping.get("x_axis")
-        y_col = mapping.get("y_axis")
-        
-        # X-axis
-        if config.get("xAxis"):
-            if "{{x_categories}}" in str(config["xAxis"]):
-                # Get unique x values for categories
-                config["xAxis"]["categories"] = series_data[0]["data"]  # Will be extracted properly
-            
-            if "{{x_title}}" in str(config["xAxis"]):
-                config["xAxis"]["title"]["text"] = x_col or ""
-        
-        # Y-axis
-        if config.get("yAxis"):
-            if "{{y_title}}" in str(config["yAxis"]):
-                config["yAxis"]["title"]["text"] = y_col or ""
-        
-        # Title
-        if config.get("title") and "{{title}}" in str(config["title"]):
-            config["title"]["text"] = options.get("title", "")
-        
-        return config
-    
-    def _apply_edge_case_configs(self, config, df, series_data):
-        """Apply configuration changes for edge cases"""
-        handlers = self.schema.get("edge_case_handlers", {})
-        
-        # Too many data points - enable boost
-        if "too_many_points" in handlers:
-            threshold = handlers["too_many_points"]["threshold"]
-            total_points = sum(len(s.get("data", [])) for s in series_data)
-            
-            if total_points > threshold:
-                config["boost"] = {
-                    "useGPUTranslations": True,
-                    "usePreAllocated": True
+                let icon;
+                if (type === 'success') {
+                    icon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`;
+                } else if (type === 'error') {
+                    icon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>`;
+                } else {
+                    icon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`;
                 }
-                for series in config["series"]:
-                    series["boostThreshold"] = 1
-        
-        return config
-```
+                toast.innerHTML = `${icon}<span>${message}</span>`;
+                toastContainer.appendChild(toast);
 
------
+                // Animate in
+                setTimeout(() => toast.classList.add('show'), 10);
 
-## Component 4: Main API Function
+                // Animate out and remove
+                setTimeout(() => {
+                    toast.classList.remove('show');
+                    toast.addEventListener('transitionend', () => toast.remove());
+                }, duration);
+            };
 
-```python
-@app.post("/generate-config")
-async def generate_config(
-    data_id: str,
-    chart_type: str,
-    column_mapping: dict,
-    options: Optional[dict] = None
-):
-    """
-    Generate Highcharts config
-    
-    Example request:
-    {
-        "data_id": "abc123",
-        "chart_type": "line",
-        "column_mapping": {
-            "x_axis": "date",
-            "y_axis": "revenue",
-            "series_by": "category"
-        },
-        "options": {
-            "title": "Revenue Over Time",
-            "colors": ["#FF6384", "#36A2EB"]
-        }
-    }
-    """
-    
-    # Load data
-    df = cache[data_id]["df"]
-    
-    # Load schema for chart type
-    schema = load_schema(chart_type)
-    
-    # Transform data
-    transformer = DataTransformer(schema)
-    transformed_df = transformer.transform(df, column_mapping)
-    
-    # Build config
-    builder = HighchartsConfigBuilder(schema)
-    config = builder.build(transformed_df, column_mapping, options)
-    
-    # Validate (optional but recommended)
-    validation_result = validate_config(config, chart_type)
-    
-    if not validation_result["valid"]:
-        raise HTTPException(400, detail=validation_result["errors"])
-    
-    return {
-        "config": config,
-        "metadata": {
-            "chart_type": chart_type,
-            "data_points": len(transformed_df),
-            "series_count": len(config["series"])
-        }
-    }
-```
+            // --- Core Functions ---
+            const setLoadingState = (isLoading, message = 'Generate Chart') => {
+                generateBtn.disabled = isLoading;
+                resetBtn.disabled = isLoading;
+                promptInput.disabled = isLoading;
+                
+                loader.classList.toggle('hidden', !isLoading);
+                sendIcon.classList.toggle('hidden', isLoading);
 
------
+                btnText.textContent = message; 
+            };
 
-## Why This Is Better Than Simple Templates
+            const handleSuccess = (result) => {
+                generationNotice.classList.add('hidden');
+                const generatedHtmlContent = result.html_code;
+                const originalPrompt = result.original_prompt;
 
-|Approach                |Simple Templates       |Schema-Driven (This)        |
-|------------------------|-----------------------|----------------------------|
-|**Data transformations**|Manual, error-prone    |Automatic, defined in schema|
-|**Edge cases**          |If-else spaghetti      |Declarative handlers        |
-|**Validation**          |Hard to validate       |Schema defines requirements |
-|**Extensibility**       |Add code for each chart|Add JSON schema             |
-|**Debugging**           |Debug Python code      |Debug data, not code        |
-|**Testing**             |Mock data in tests     |Test schemas independently  |
+                if (!generatedHtmlContent || generatedHtmlContent.trim() === '') {
+                     handleFinalError(new Error('Generation failed: The model returned an empty response.'));
+                     return;
+                }
+                
+                placeholderSection.classList.add('hidden');
+                outputSection.classList.remove('hidden');
+                errorMessage.classList.add('hidden');
+                outputIframe.onload = () => {
+                    outputIframe.contentWindow.onerror = null; 
+                    outputIframe.contentWindow.onerror = (message, source, lineno, colno, error) => {
+                        console.error("Error in generated chart:", error);
+                        const errorDetails = error ? error.stack : message;
+                        runGeneration(originalPrompt, errorDetails, 2);
+                        return true;
+                    };
+                };
 
------
+                outputIframe.srcdoc = generatedHtmlContent;
+                
+                document.getElementById('save-html-btn').onclick = () => {
+                    saveAsHtml(generatedHtmlContent);
+                    showToast('Chart saved as HTML.', 'success');
+                };
+                
+                setLoadingState(false);
+                showToast('Chart generated successfully!', 'success');
+            };
 
-## Example: Generate Multiple Configs
+            const handleFinalError = (finalError) => {
+                generationNotice.classList.add('hidden');
+                errorText.textContent = finalError.message;
+                errorMessage.classList.remove('hidden');
+                setLoadingState(false);
+                showToast('An error occurred during generation.', 'error');
+            };
+            
+            const pollForResult = (taskId) => {
+                let pollingAttempts = 0;
+                const maxPollingAttempts = 80;
 
-```python
-@app.post("/generate-all-recommended")
-async def generate_all_configs(data_id: str, recommendations: list):
-    """
-    Generate configs for all recommended chart types
-    """
-    configs = []
-    
-    for rec in recommendations[:3]:  # Top 3
-        chart_type = rec["chart_type"]
-        column_mapping = rec["data_requirements"]  # From recommendation
-        
-        try:
-            config = await generate_config(
-                data_id=data_id,
-                chart_type=chart_type,
-                column_mapping=column_mapping
-            )
-            configs.append({
-                "chart_type": chart_type,
-                "config": config["config"],
-                "reasoning": rec["reasoning"]
-            })
-        except Exception as e:
-            # Log but continue with other charts
-            print(f"Failed to generate {chart_type}: {e}")
-    
-    return {"configs": configs}
-```
+                const intervalId = setInterval(async () => {
+                    pollingAttempts++;
 
------
+                    if (pollingAttempts > 20 && pollingAttempts <= 50) { 
+                        setLoadingState(true, 'Still working, this can take a moment...');
+                    } else if (pollingAttempts > 50) {
+                         setLoadingState(true, 'Almost there, generating complex chart...');
+                    }
 
-## Summary: Your Solution vs. Best Solution
+                    if (pollingAttempts > maxPollingAttempts) {
+                        clearInterval(intervalId);
+                        handleFinalError(new Error('Task timed out. The server took too long to respond.'));
+                        return;
+                    }
+                    try {
+                        const response = await fetch(`/api/status/${taskId}`);
+                        if (!response.ok) {
+                             if (response.status === 404 && pollingAttempts > 3) {
+                                 clearInterval(intervalId);
+                                 throw new Error('Task could not be found on the server.');
+                             }
+                            return;
+                        }
+                        
+                        const data = await response.json();
+                        if (data.status === 'SUCCESS') {
+                            clearInterval(intervalId);
+                            handleSuccess(data.result);
+                        } else if (data.status === 'FAILED') {
+                            clearInterval(intervalId);
+                            throw new Error(data.result.detail || 'The generation task failed unexpectedly.');
+                        }
+                    } catch (error) {
+                        clearInterval(intervalId);
+                        handleFinalError(error);
+                    }
+                }, POLLING_INTERVAL);
+            };
 
-**Your Solution:**
+            const runGeneration = async (prompt, errorFeedback = null, attempt = 1) => {
+                if (attempt > MAX_ATTEMPTS) {
+                    handleFinalError(new Error(`Failed to fix the chart after ${MAX_ATTEMPTS} attempts. Please try rephrasing your request.`));
+                    return;
+                }
+                
+                const loadingMessage = errorFeedback 
+                    ? `Error detected. Attempting to fix... (Attempt ${attempt}/${MAX_ATTEMPTS})` 
+                    : 'Generating...';
+                setLoadingState(true, loadingMessage);
+                errorMessage.classList.add('hidden');
+                try {
+                    const formData = new FormData();
+                    formData.append('prompt', prompt);
+                    formData.append('session_id', sessionId);
+                    if (errorFeedback) {
+                        formData.append('error_feedback', errorFeedback);
+                    }
 
-- Templates with placeholders ✅
-- Manual data insertion ⚠️
-- Limited transformations ⚠️
-- Hard to handle edge cases ❌
+                    const response = await fetch('/api/generate', { method: 'POST', body: formData });
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({ detail: 'An unknown server error.' }));
+                        throw new Error(errorData.detail || 'Failed to start the generation task.');
+                    }
+                    const data = await response.json();
+                    pollForResult(data.task_id);
+                } catch(fetchError) {
+                    handleFinalError(fetchError);
+                }
+            };
+            
+            generateBtn.addEventListener('click', () => {
+                const userPrompt = promptInput.value.trim();
+                if (!userPrompt) {
+                    showToast('Please enter a chart description.', 'info');
+                    return;
+                }
+                
+                generationNotice.classList.remove('hidden');
+                
+                runGeneration(userPrompt, null, 1);
+            });
 
-**Best Solution (Schema-Driven):**
+            resetBtn.addEventListener('click', async () => {
+                const formData = new FormData();
+                formData.append('session_id', sessionId);
+                try {
+                    const response = await fetch('/api/reset', { method: 'POST', body: formData });
+                    if(response.ok) {
+                        showToast("Conversation memory has been reset.", 'success');
+                        promptInput.value = "";
+                        outputSection.classList.add('hidden');
+                        placeholderSection.classList.remove('hidden');
+                    } else {
+                        showToast("Failed to reset memory.", 'error');
+                    }
+                } catch (error) {
+                    console.error("Error resetting memory:", error);
+                    showToast("An error occurred while resetting the memory.", 'error');
+                }
+            });
+            // --- Utility Functions ---
+            function saveAsHtml(htmlContent) {
+                if (!htmlContent) return;
+                const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'chart.html';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            }
+            
+            // Simple UUID generator for session tracking
+            function uuidv4() {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                    return v.toString(16);
+                });
+            }
+        });
+    </script>
+</body>
+</html>
 
-- Schemas define data requirements ✅
-- Automatic transformations ✅
-- Declarative edge case handling ✅
-- Easy to extend (add JSON, not code) ✅
-- Testable and debuggable ✅
-
-**The key difference:** Schemas encode **how to transform data**, not just **where to put it**.
-
-Would you like me to show you example schemas for 5-6 common chart types to get you started?​​​​​​​​​​​​​​​​
+'''
