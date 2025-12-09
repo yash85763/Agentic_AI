@@ -501,8 +501,426 @@ Tables:
 
 -----
 
-Would you like me to:
+Excellent question! Let me map each documentation type **directly to your workflow** and explain why you actually need them.
 
-1. **Show you how to scrape/extract** the API documentation?
-1. **Create example scripts** for building these documentation files?
-1. **Start with a specific documentation type** (e.g., chart types metadata)?​​​​​​​​​​​​​​​​
+## Your Workflow Reminder:
+
+```
+CSV Upload → Data Analysis → Chart Recommendation → Config Generation → User Modifications → Template Updates
+```
+
+Let me break down **when and why** each documentation type is used:
+
+-----
+
+## **1. Chart Types Metadata**
+
+### **When Used:**
+
+- **Step 3: Chart Recommendation Phase**
+
+### **Why Needed:**
+
+Your AI needs to answer: *“Given this data, which chart type should I use?”*
+
+### **How Utilized:**
+
+```
+LLM receives data analysis:
+- "3 columns: Date, Revenue, Expenses"
+- "50 rows, no nulls"
+- "Date column is datetime"
+- "2 numeric series"
+
+LLM queries tool: get_best_chart_types(data_characteristics)
+
+Tool uses Chart Types Metadata to return:
+- "line" (score: 95) - "Best for comparing trends over time"
+- "column" (score: 85) - "Good for period comparisons"
+- "area" (score: 80) - "Shows volume trends"
+
+LLM selects "line" and explains why to user
+```
+
+### **Without This:**
+
+- LLM guesses chart types from general knowledge
+- May suggest chart types Highcharts doesn’t support
+- Can’t explain WHY a chart type fits the data
+- Inconsistent recommendations
+
+### **Significance:**
+
+⭐⭐⭐⭐⭐ **CRITICAL** - Core of your chart recommendation logic
+
+-----
+
+## **2. API Options Hierarchy**
+
+### **When Used:**
+
+- **Step 4: Config Generation**
+- **Step 5: User Modifications**
+
+### **Why Needed:**
+
+Your AI needs to know: *“What configuration options exist and how are they structured?”*
+
+### **How Utilized:**
+
+**Scenario A - Initial Config:**
+
+```
+User: "Create a chart"
+LLM needs to generate: {chart: {type: "line"}, title: {...}}
+
+Tool: get_option_details("title.text")
+Returns: {path: "title.text", type: "string", default: "Chart title"}
+
+LLM generates valid config structure
+```
+
+**Scenario B - User Modification:**
+
+```
+User: "Make the title bigger"
+LLM needs to know: "What option controls title size?"
+
+Tool: search_options("title size")
+Returns: "title.style.fontSize"
+
+LLM outputs: {path: "title.style.fontSize", value: "24px"}
+Chart engine updates template at this exact path
+```
+
+### **Without This:**
+
+- LLM invents option paths that don’t exist: `title.size` ❌
+- Wrong nesting: `title.fontSize` instead of `title.style.fontSize` ❌
+- Can’t validate if an option is valid
+- Template engine fails because paths are wrong
+
+### **Significance:**
+
+⭐⭐⭐⭐⭐ **CRITICAL** - Ensures accurate path updates for your template engine
+
+-----
+
+## **3. Chart Type Configuration Templates**
+
+### **When Used:**
+
+- **Step 4: Config Generation** (Initial chart creation)
+
+### **Why Needed:**
+
+Your chart engine has predefined templates. LLM needs to know *“What are the minimal required options for each chart type?”*
+
+### **How Utilized:**
+
+```
+LLM decides: "Use line chart"
+
+Tool: get_template("line")
+Returns minimal structure:
+{
+  "chart": {"type": "line"},
+  "title": {"text": ""},
+  "xAxis": {"categories": []},
+  "series": [{"name": "", "data": []}]
+}
+
+LLM fills in values from data analysis:
+{
+  "chart": {"type": "line"},
+  "title": {"text": "Revenue vs Expenses Over Time"},
+  "xAxis": {"categories": ["Jan", "Feb", "Mar"]},
+  "series": [
+    {"name": "Revenue", "data": [100, 150, 200]},
+    {"name": "Expenses", "data": [80, 90, 110]}
+  ]
+}
+```
+
+### **Without This:**
+
+- LLM doesn’t know what structure to output
+- Might forget required fields like `series`
+- Inconsistent config structure across chart types
+- Your chart engine receives incomplete configs
+
+### **Significance:**
+
+⭐⭐⭐⭐ **VERY IMPORTANT** - Ensures LLM outputs match your template engine’s expectations
+
+-----
+
+## **4. Option Details Database**
+
+### **When Used:**
+
+- **Step 5: User Modifications** (constantly)
+
+### **Why Needed:**
+
+User says: *“Add gridlines”* - LLM needs to know the exact option path and valid values
+
+### **How Utilized:**
+
+```
+User: "Add gridlines to the chart"
+
+Tool: search_options_by_intent("gridlines")
+Returns:
+{
+  "xAxis.gridLineWidth": {type: "number", default: 1},
+  "yAxis.gridLineWidth": {type: "number", default: 1}
+}
+
+LLM outputs:
+[
+  {path: "xAxis.gridLineWidth", value: 1},
+  {path: "yAxis.gridLineWidth", value: 1}
+]
+```
+
+### **Without This:**
+
+- LLM searches through RAG and gets vague descriptions
+- Returns text explanation instead of exact path
+- Chart engine can’t apply the update
+- Requires user to manually specify exact option names
+
+### **Significance:**
+
+⭐⭐⭐⭐⭐ **CRITICAL** - Core of modification request handling
+
+-----
+
+## **5. Data-to-Chart Mapping Rules**
+
+### **When Used:**
+
+- **Step 3: Chart Recommendation Phase**
+
+### **Why Needed:**
+
+LLM needs logic to match data characteristics to chart types
+
+### **How Utilized:**
+
+```
+Data Analysis Results:
+- has_datetime: true
+- numeric_columns: 2
+- data_points: 100
+- has_categories: false
+
+Tool: get_chart_recommendations({
+  has_datetime: true,
+  numeric_series: 2,
+  data_points: 100
+})
+
+Mapping Rule Matches:
+"time_series_multiple" → ["line", "area", "spline"]
+
+Returns ranked recommendations with reasoning
+```
+
+### **Without This:**
+
+- LLM uses generic knowledge (might work, but inconsistent)
+- No systematic reasoning for chart selection
+- Can’t explain why chart X is better than chart Y for this data
+
+### **Significance:**
+
+⭐⭐⭐⭐ **VERY IMPORTANT** - Improves chart recommendation quality and consistency
+
+-----
+
+## **6. Common Configuration Patterns**
+
+### **When Used:**
+
+- **Step 5: User Modifications** (for ambiguous requests)
+
+### **Why Needed:**
+
+User says: *“Make it look better”* - vague request needs pattern matching
+
+### **How Utilized:**
+
+```
+User: "make the title bigger"
+
+Tool: match_pattern("make title bigger")
+Returns:
+{
+  intent_matched: "increase_title_size",
+  updates: {
+    "title.style.fontSize": "20px",
+    "title.style.fontWeight": "bold"
+  }
+}
+
+LLM outputs these exact updates
+```
+
+### **Without This:**
+
+- LLM interprets every request from scratch
+- Inconsistent responses to similar requests
+- Slower response time
+- May miss related options (font weight when increasing size)
+
+### **Significance:**
+
+⭐⭐⭐ **NICE TO HAVE** - Speeds up common modifications, improves UX
+
+-----
+
+## **7. Version Compatibility Matrix**
+
+### **When Used:**
+
+- **All phases** (background checking)
+
+### **Why Needed:**
+
+Your template engine uses specific Highcharts version. LLM must not suggest options that don’t exist in that version.
+
+### **How Utilized:**
+
+```
+System Configuration: Highcharts version = 12.4.0
+
+User: "Add a pictorial series"
+
+Tool: check_option_availability("pictorial", version="12.4.0")
+Returns: Available in v12.0.0+
+
+LLM proceeds with suggestion
+```
+
+```
+User: "Use the new feature X"
+
+Tool: check_option_availability("featureX", version="12.4.0")
+Returns: Only available in v13.0.0+
+
+LLM responds: "This feature requires Highcharts 13.0.0. 
+You're using 12.4.0. Consider upgrading."
+```
+
+### **Without This:**
+
+- LLM suggests features that don’t work in your version
+- Chart engine throws errors
+- User frustration from broken suggestions
+
+### **Significance:**
+
+⭐⭐⭐⭐ **IMPORTANT** - Prevents version-related errors
+
+-----
+
+## **8. Validation Rules**
+
+### **When Used:**
+
+- **Step 4: Config Generation** (before sending to chart engine)
+- **Step 5: After User Modifications**
+
+### **Why Needed:**
+
+Catch errors before the chart engine tries to render
+
+### **How Utilized:**
+
+```
+LLM generates config:
+{
+  "chart": {"type": "pie"},
+  "xAxis": {"categories": ["A", "B"]}  // ❌ Pie charts don't use xAxis
+}
+
+Tool: validate_config(config, "pie")
+Returns: {
+  valid: false,
+  errors: ["xAxis is not compatible with pie charts"]
+}
+
+LLM removes xAxis and regenerates valid config
+```
+
+### **Without This:**
+
+- Invalid configs sent to chart engine
+- Chart engine errors are cryptic
+- User sees broken chart or error messages
+- More back-and-forth debugging
+
+### **Significance:**
+
+⭐⭐⭐⭐ **VERY IMPORTANT** - Ensures reliability and reduces errors
+
+-----
+
+## **Priority Matrix for Your Project:**
+
+|Documentation              |Critical?     |When in Workflow          |Can Start Without?                |
+|---------------------------|--------------|--------------------------|----------------------------------|
+|**API Options Hierarchy**  |🔴 YES         |Config Gen + Modifications|❌ No - Core functionality         |
+|**Chart Types Metadata**   |🔴 YES         |Chart Recommendation      |❌ No - Core functionality         |
+|**Option Details Database**|🔴 YES         |User Modifications        |❌ No - Can’t handle requests      |
+|**Validation Rules**       |🟡 Important   |Before Render             |✅ Yes - Add as you find issues    |
+|**Templates**              |🟡 Important   |Initial Config            |✅ Yes - LLM can generate structure|
+|**Version Compatibility**  |🟡 Important   |All phases                |✅ Yes - Assume latest version     |
+|**Mapping Rules**          |🟢 Nice to Have|Chart Recommendation      |✅ Yes - LLM can decide            |
+|**Common Patterns**        |🟢 Nice to Have|Modifications             |✅ Yes - Optimize later            |
+
+-----
+
+## **What You Absolutely Need to Start:**
+
+### **Minimum Viable Documentation (MVP):**
+
+1. **API Options Hierarchy** - So LLM knows valid paths
+
+- Without: Can’t generate accurate config updates ❌
+
+1. **Chart Types Metadata** - So LLM knows what chart types exist and their data requirements
+
+- Without: Poor chart recommendations ❌
+
+1. **Option Details for Common Modifications** - Title, colors, axes, series
+
+- Without: Can’t handle basic user requests ❌
+
+### **Add Later:**
+
+- Full validation rules (build as you encounter issues)
+- Common patterns (optimize after MVP works)
+- Version compatibility (if you only support one version initially)
+
+-----
+
+## **The Real Question: Do You Need All 8?**
+
+**Honestly? No.**
+
+### **Start with these 3:**
+
+1. **Chart Types Metadata** (small, manual, ~50 chart types)
+1. **API Options Hierarchy** (large, scrape/download)
+1. **Key Options Details** (subset of #2, ~100 most common options)
+
+### **Build the rest as you go:**
+
+- Find users request X often → Add to patterns
+- Hit a validation issue → Add validation rule
+- Support new version → Add version compatibility
+
+-----
