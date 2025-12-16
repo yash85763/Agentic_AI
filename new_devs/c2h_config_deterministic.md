@@ -1,16 +1,10 @@
-You’re absolutely right! Let’s separate the build and query phases, and add progress tracking + delays:
+Great question! Here are the updates to handle multiple tree files:
 
 ## Updated graph_builder.py
 
 ```python
 # graph_builder.py
-import re
-import requests
-import networkx as nx
-import numpy as np
-import time
-from typing import Dict, Any
-from utils.embed import embed
+# ... (keep all existing imports and clean_description method)
 
 class SimpleHighchartsGraph:
     def __init__(self):
@@ -18,41 +12,45 @@ class SimpleHighchartsGraph:
         self.embeddings = {}
         self.node_count = 0
     
-    def clean_description(self, text: str) -> str:
-        """Remove markdown links and clean text"""
-        if not text:
-            return ""
+    # ADD: New method to build from multiple sources
+    def build_from_multiple_sources(self, sources: Dict[str, str]):
+        """
+        Build graph from multiple tree sources
         
-        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-        text = re.sub(r'<[^>]+>', '', text)
-        text = re.sub(r'`([^`]+)`', r'\1', text)
-        text = re.sub(r'\[#\d+\]', '', text)
-        text = re.sub(r'see \[([^\]]+)\]\([^\)]+\)', r'see \1', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
+        Args:
+            sources: Dict of {source_name: url}
+                    e.g., {'highcharts': 'url1', 'highstock': 'url2'}
+        """
+        for source_name, tree_url in sources.items():
+            print(f"\n{'='*60}")
+            print(f"Processing: {source_name}")
+            print(f"{'='*60}")
+            self.build_graph(tree_url, source=source_name)
     
-    def build_graph(self, tree_url: str):
+    # UPDATE: Add source parameter to build_graph
+    def build_graph(self, tree_url: str, source: str = "highcharts"):
         """Fetch JSON from URL and convert to graph"""
         print(f"Fetching tree from: {tree_url}")
         print("This may take a moment, the file is large...")
         
-        response = requests.get(tree_url, timeout=30)  # 30 second timeout
+        response = requests.get(tree_url, timeout=30)
         response.raise_for_status()
         tree_json = response.json()
         
         print("✓ JSON fetched successfully!")
         print(f"JSON size: ~{len(str(tree_json)) / 1024:.1f} KB")
-        print("\nBuilding graph (this will take a few minutes)...")
+        print(f"\nBuilding graph for {source} (this will take a few minutes)...")
         
-        self.node_count = 0
-        self._process_node(tree_json, parent_path=None)
+        start_count = self.node_count
+        self._process_node(tree_json, parent_path=None, source=source)
         
-        print(f"\n✓ Graph built successfully!")
-        print(f"  Total nodes: {self.graph.number_of_nodes()}")
-        print(f"  Total edges: {self.graph.number_of_edges()}")
+        nodes_added = self.node_count - start_count
+        print(f"\n✓ {source} graph built successfully!")
+        print(f"  Nodes added: {nodes_added}")
+        print(f"  Total nodes so far: {self.graph.number_of_nodes()}")
     
-    def _process_node(self, node: Dict, parent_path: str = None):
+    # UPDATE: Add source parameter to _process_node
+    def _process_node(self, node: Dict, parent_path: str = None, source: str = "highcharts"):
         """Recursively process each node"""
         for key, value in node.items():
             if key in ['_meta']:
@@ -80,13 +78,13 @@ class SimpleHighchartsGraph:
                 if self.node_count % 10 == 0:
                     print(f"  Processing node {self.node_count}...", end='\r')
                 
-                # Add small delay every 50 nodes to avoid rate limiting
+                # Add delay every 50 nodes
                 if self.node_count % 50 == 0:
-                    time.sleep(0.5)  # 500ms delay
+                    time.sleep(0.5)
                 
                 embedding = embed(embedding_text)
                 
-                # Add node to graph
+                # Add node to graph with source tag
                 self.graph.add_node(
                     full_path,
                     name=key,
@@ -95,7 +93,8 @@ class SimpleHighchartsGraph:
                     defaultValue=doclet.get('defaultvalue'),
                     since=doclet.get('since'),
                     samples=doclet.get('samples', []),
-                    requires=doclet.get('requires', [])
+                    requires=doclet.get('requires', []),
+                    source=source  # ADD: Tag with source
                 )
                 
                 # Store embedding
@@ -108,39 +107,92 @@ class SimpleHighchartsGraph:
                 # Process children
                 children = value.get('children', {})
                 if children:
-                    self._process_node(children, parent_path=full_path)
+                    self._process_node(children, parent_path=full_path, source=source)
             else:
                 children = value.get('children', {})
                 if children:
-                    self._process_node(children, parent_path=parent_path)
+                    self._process_node(children, parent_path=parent_path, source=source)
     
-    def save(self, filepath: str = "highcharts_graph.gpickle"):
-        """Save graph to file"""
-        import pickle
-        print(f"\nSaving graph to {filepath}...")
-        with open(filepath, 'wb') as f:
-            pickle.dump({
-                'graph': self.graph,
-                'embeddings': self.embeddings
-            }, f)
-        print(f"✓ Graph saved successfully!")
-    
-    def load(self, filepath: str = "highcharts_graph.gpickle"):
-        """Load graph from file"""
-        import pickle
-        print(f"Loading graph from {filepath}...")
-        with open(filepath, 'rb') as f:
-            data = pickle.load(f)
-            self.graph = data['graph']
-            self.embeddings = data['embeddings']
-        print(f"✓ Graph loaded successfully!")
-        print(f"  Nodes: {self.graph.number_of_nodes()}")
-        print(f"  Edges: {self.graph.number_of_edges()}")
+    # ... (keep save and load methods unchanged)
 ```
 
-## Updated main.py - Split into two scripts
+## Updated retriever.py
 
-### build_graph.py (Run once to build)
+```python
+# retriever.py
+import numpy as np
+from typing import List, Dict, Optional
+from utils.embed import embed
+
+class SimpleRetriever:
+    def __init__(self, graph_builder):
+        self.graph = graph_builder.graph
+        self.embeddings = graph_builder.embeddings
+    
+    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """Calculate cosine similarity between two vectors"""
+        return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+    
+    # UPDATE: Add source filter
+    def search(self, user_query: str, top_k: int = 3, source: Optional[str] = None) -> List[Dict]:
+        """
+        Semantic search + get surrounding context
+        
+        Args:
+            user_query: Search query
+            top_k: Number of results
+            source: Filter by source ('highcharts', 'highstock', or None for all)
+        """
+        # Get query embedding
+        query_embedding = np.array(embed(user_query))
+        
+        # Calculate similarity with all nodes (optionally filtered by source)
+        similarities = {}
+        for node_id, node_embedding in self.embeddings.items():
+            # Filter by source if specified
+            if source:
+                node_source = self.graph.nodes[node_id].get('source')
+                if node_source != source:
+                    continue
+            
+            sim = self.cosine_similarity(query_embedding, node_embedding)
+            similarities[node_id] = sim
+        
+        # Get top K most similar
+        top_nodes = sorted(similarities.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        
+        # Build results with context
+        results = []
+        for node_id, score in top_nodes:
+            node_data = self.graph.nodes[node_id]
+            
+            # Get ancestors
+            ancestors = list(nx.ancestors(self.graph, node_id))
+            
+            # Get children
+            children = list(self.graph.predecessors(node_id))
+            
+            result = {
+                'path': node_id,
+                'name': node_data['name'],
+                'description': node_data['description'],
+                'type': node_data['type'],
+                'defaultValue': node_data.get('defaultValue'),
+                'since': node_data.get('since'),
+                'samples': node_data.get('samples', []),
+                'source': node_data.get('source', 'unknown'),  # ADD: Include source
+                'ancestors': ancestors,
+                'children': children,
+                'relevance': float(score)
+            }
+            results.append(result)
+        
+        return results
+    
+    # ... (keep get_subgraph method unchanged)
+```
+
+## Updated build_graph.py
 
 ```python
 # build_graph.py
@@ -158,13 +210,34 @@ def main():
             print("Skipping rebuild. Use query.py to search.")
             return
     
-    # Build graph
-    tree_url = "https://api.highcharts.com/highcharts/tree.json"
+    # Define multiple sources
+    sources = {
+        'highcharts': 'https://api.highcharts.com/highcharts/tree.json',
+        'highstock': 'https://api.highcharts.com/highstock/tree.json'
+    }
     
     try:
-        builder.build_graph(tree_url)
+        builder.build_from_multiple_sources(sources)
         builder.save("highcharts_graph.gpickle")
-        print("\n✓ All done! You can now run query.py to search the graph.")
+        
+        print("\n" + "="*60)
+        print("✓ All done! Summary:")
+        print(f"  Total nodes: {builder.graph.number_of_nodes()}")
+        print(f"  Total edges: {builder.graph.number_of_edges()}")
+        
+        # Show node count per source
+        from collections import Counter
+        sources_count = Counter(
+            data.get('source', 'unknown') 
+            for _, data in builder.graph.nodes(data=True)
+        )
+        print("\n  Nodes per source:")
+        for source, count in sources_count.items():
+            print(f"    {source}: {count}")
+        
+        print("\nYou can now run query.py to search the graph.")
+        print("="*60)
+        
     except Exception as e:
         print(f"\n✗ Error: {e}")
         print("If you got a timeout, try running again with a better internet connection.")
@@ -173,7 +246,7 @@ if __name__ == "__main__":
     main()
 ```
 
-### query.py (Run to search)
+## Updated query.py
 
 ```python
 # query.py
@@ -197,32 +270,58 @@ def main():
     
     # Interactive query loop
     print("\n" + "="*60)
-    print("Highcharts API Search")
+    print("Highcharts/Highstock API Search")
     print("="*60)
-    print("Type your question or 'quit' to exit\n")
+    print("Commands:")
+    print("  - Type your question to search")
+    print("  - 'filter:highcharts <query>' - search only Highcharts")
+    print("  - 'filter:highstock <query>' - search only Highstock")
+    print("  - 'quit' to exit")
+    print("="*60 + "\n")
     
     while True:
-        user_query = input("Query: ").strip()
+        user_input = input("Query: ").strip()
         
-        if user_query.lower() in ['quit', 'exit', 'q']:
+        if user_input.lower() in ['quit', 'exit', 'q']:
             print("Goodbye!")
             break
         
-        if not user_query:
+        if not user_input:
             continue
         
-        print(f"\nSearching for: '{user_query}'")
+        # Parse filter command
+        source_filter = None
+        if user_input.startswith('filter:'):
+            parts = user_input.split(' ', 1)
+            if len(parts) == 2:
+                source_filter = parts[0].replace('filter:', '')
+                user_query = parts[1]
+            else:
+                print("Usage: filter:highcharts <query>")
+                continue
+        else:
+            user_query = user_input
+        
+        print(f"\nSearching for: '{user_query}'", end="")
+        if source_filter:
+            print(f" (filtered by: {source_filter})")
+        else:
+            print(" (all sources)")
         print("-" * 60)
         
-        results = retriever.search(user_query, top_k=3)
+        results = retriever.search(user_query, top_k=5, source=source_filter)
         
-        for i, result in enumerate(results, 1):
-            print(f"\n[{i}] {result['path']} (relevance: {result['relevance']:.3f})")
-            print(f"    Type: {', '.join(result['type']) if result['type'] else 'N/A'}")
-            print(f"    Default: {result['defaultValue']}")
-            print(f"    Description: {result['description'][:150]}...")
-            if result['ancestors']:
-                print(f"    Parent: {result['ancestors'][0] if result['ancestors'] else 'N/A'}")
+        if not results:
+            print("No results found.")
+        else:
+            for i, result in enumerate(results, 1):
+                print(f"\n[{i}] {result['path']} [{result['source']}]")
+                print(f"    Relevance: {result['relevance']:.3f}")
+                print(f"    Type: {', '.join(result['type']) if result['type'] else 'N/A'}")
+                print(f"    Default: {result['defaultValue']}")
+                print(f"    Description: {result['description'][:150]}...")
+                if result['ancestors']:
+                    print(f"    Parent: {result['ancestors'][0] if result['ancestors'] else 'N/A'}")
         
         print("\n" + "-" * 60 + "\n")
 
@@ -230,35 +329,37 @@ if __name__ == "__main__":
     main()
 ```
 
-## Usage:
+## Summary of Changes:
+
+1. **graph_builder.py**:
+
+- Added `source` parameter to tag each node
+- Added `build_from_multiple_sources()` method
+
+1. **retriever.py**:
+
+- Added `source` filter to search method
+- Returns source in results
+
+1. **build_graph.py**:
+
+- Now builds from both URLs
+- Shows node count per source
+
+1. **query.py**:
+
+- Added filter commands (`filter:highcharts` or `filter:highstock`)
+- Displays source in results
+
+Usage:
 
 ```bash
-# Step 1: Build the graph (run once, takes several minutes)
+# Build both
 python build_graph.py
 
-# Step 2: Query the graph (run as many times as you want)
-python query.py
+# Search all
+Query: grid line color
+
+# Search only highstock
+Query: filter:highstock navigator
 ```
-
-Example query session:
-
-```
-Query: change grid line color to green
-
-[1] xAxis.gridLineColor (relevance: 0.892)
-    Type: ColorString
-    Default: #e6e6e6
-    Description: Color of the grid lines extending from the axis across the plot area...
-    Parent: xAxis
-
-[2] yAxis.gridLineColor (relevance: 0.885)
-    ...
-```
-
-This approach:
-
-- ✓ Separates build and query
-- ✓ Shows progress during build
-- ✓ Adds delays to avoid rate limiting
-- ✓ Saves graph for reuse
-- ✓ Interactive query mode​​​​​​​​​​​​​​​​
