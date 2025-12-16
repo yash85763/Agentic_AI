@@ -1,16 +1,26 @@
-Got it! Let me update the code to use your custom embed function:
+No problem! We can use **NetworkX** (pure Python graph library) with **in-memory vector search**. No external database needed!
 
-## Updated Graph Builder
+## Install dependencies
+
+```bash
+pip install networkx numpy requests
+```
+
+## Updated graph_builder.py
 
 ```python
 # graph_builder.py
 import re
-from typing import Dict, Any
-from utils.embed import embed  # Your custom embed function
+import requests
+import networkx as nx
+import numpy as np
+from typing import Dict, Any, List
+from utils.embed import embed
 
 class SimpleHighchartsGraph:
-    def __init__(self, driver):
-        self.driver = driver
+    def __init__(self):
+        self.graph = nx.DiGraph()  # Directed graph for parent-child relationships
+        self.embeddings = {}  # Store embeddings separately for fast search
     
     def clean_description(self, text: str) -> str:
         """Remove markdown links and clean text"""
@@ -37,28 +47,30 @@ class SimpleHighchartsGraph:
         
         return text
     
-    def build_graph(self, tree_json: Dict[str, Any]):
-        """Convert JSON tree directly to graph"""
+    def build_graph(self, tree_url: str):
+        """Fetch JSON from URL and convert to graph"""
+        print(f"Fetching tree from: {tree_url}")
+        response = requests.get(tree_url)
+        response.raise_for_status()
+        tree_json = response.json()
+        print("JSON fetched successfully!")
+        
+        print("Building graph...")
         self._process_node(tree_json, parent_path=None)
+        print(f"Graph built! {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
     
     def _process_node(self, node: Dict, parent_path: str = None):
-        """
-        Recursively process each node.
-        Create a graph node if 'doclet' exists.
-        """
+        """Recursively process each node"""
         for key, value in node.items():
-            # Skip metadata keys
             if key in ['_meta']:
                 continue
             
-            # Check if this is a property node (has doclet)
             if not isinstance(value, dict):
                 continue
                 
             doclet = value.get('doclet', {})
             meta = value.get('meta', {})
             
-            # Only create node if doclet exists (actual property)
             if doclet:
                 full_path = meta.get('fullname', key)
                 
@@ -67,255 +79,201 @@ class SimpleHighchartsGraph:
                     doclet.get('description', '')
                 )
                 
-                # Prepare node data
-                node_data = {
-                    'id': full_path,
-                    'name': key,
-                    'fullPath': full_path,
-                    'description': description,
-                    'type': doclet.get('type', {}).get('names', []),
-                    'defaultValue': doclet.get('defaultvalue'),
-                    'since': doclet.get('since'),
-                    'samples': doclet.get('samples', []),
-                    'requires': doclet.get('requires', []),
-                }
-                
-                # Create embedding using custom embed function
+                # Create embedding
                 embedding_text = f"{key}: {description}"
-                node_data['embedding'] = embed(embedding_text)  # Your custom function
+                embedding = embed(embedding_text)
                 
-                # Create node in graph
-                self._create_node(node_data)
+                # Add node to graph
+                self.graph.add_node(
+                    full_path,
+                    name=key,
+                    description=description,
+                    type=doclet.get('type', {}).get('names', []),
+                    defaultValue=doclet.get('defaultvalue'),
+                    since=doclet.get('since'),
+                    samples=doclet.get('samples', []),
+                    requires=doclet.get('requires', [])
+                )
                 
-                # Create relationship to parent
+                # Store embedding separately
+                self.embeddings[full_path] = np.array(embedding)
+                
+                # Create edge from child to parent
                 if parent_path:
-                    self._create_relationship(full_path, parent_path)
+                    self.graph.add_edge(full_path, parent_path)
                 
                 # Process children
                 children = value.get('children', {})
                 if children:
                     self._process_node(children, parent_path=full_path)
             else:
-                # No doclet but might have children (like at root level)
                 children = value.get('children', {})
                 if children:
                     self._process_node(children, parent_path=parent_path)
     
-    def _create_node(self, node_data: Dict):
-        """Create property node in Neo4j"""
-        query = """
-        CREATE (p:Property {
-            id: $id,
-            name: $name,
-            fullPath: $fullPath,
-            description: $description,
-            type: $type,
-            defaultValue: $defaultValue,
-            since: $since,
-            samples: $samples,
-            requires: $requires,
-            embedding: $embedding
-        })
-        """
-        self.driver.execute_query(query, **node_data)
+    def save(self, filepath: str = "highcharts_graph.gpickle"):
+        """Save graph to file"""
+        import pickle
+        with open(filepath, 'wb') as f:
+            pickle.dump({
+                'graph': self.graph,
+                'embeddings': self.embeddings
+            }, f)
+        print(f"Graph saved to {filepath}")
     
-    def _create_relationship(self, child_path: str, parent_path: str):
-        """Create CHILD_OF relationship"""
-        query = """
-        MATCH (child:Property {id: $child_path})
-        MATCH (parent:Property {id: $parent_path})
-        CREATE (child)-[:CHILD_OF]->(parent)
-        """
-        self.driver.execute_query(
-            query, 
-            child_path=child_path, 
-            parent_path=parent_path
-        )
+    def load(self, filepath: str = "highcharts_graph.gpickle"):
+        """Load graph from file"""
+        import pickle
+        with open(filepath, 'rb') as f:
+            data = pickle.load(f)
+            self.graph = data['graph']
+            self.embeddings = data['embeddings']
+        print(f"Graph loaded from {filepath}")
 ```
 
-## Updated Retriever
+## Updated retriever.py
 
 ```python
 # retriever.py
-from utils.embed import embed  # Your custom embed function
+import numpy as np
+from typing import List, Dict
+from utils.embed import embed
 
 class SimpleRetriever:
-    def __init__(self, driver):
-        self.driver = driver
+    def __init__(self, graph_builder):
+        self.graph = graph_builder.graph
+        self.embeddings = graph_builder.embeddings
     
-    def search(self, user_query: str, top_k: int = 3):
+    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """Calculate cosine similarity between two vectors"""
+        return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+    
+    def search(self, user_query: str, top_k: int = 3) -> List[Dict]:
         """
-        Simple semantic search + get surrounding context
-        Query: "change grid line color to green"
+        Semantic search + get surrounding context
         """
+        # Get query embedding
+        query_embedding = np.array(embed(user_query))
         
-        query_embedding = embed(user_query)  # Your custom function
+        # Calculate similarity with all nodes
+        similarities = {}
+        for node_id, node_embedding in self.embeddings.items():
+            sim = self.cosine_similarity(query_embedding, node_embedding)
+            similarities[node_id] = sim
         
-        cypher = """
-        // 1. Find most relevant nodes by vector similarity
-        CALL db.index.vector.queryNodes(
-            'property_embeddings', 
-            $top_k, 
-            $query_embedding
-        )
-        YIELD node, score
+        # Get top K most similar
+        top_nodes = sorted(similarities.items(), key=lambda x: x[1], reverse=True)[:top_k]
         
-        // 2. Get parent chain (for context)
-        OPTIONAL MATCH path = (node)-[:CHILD_OF*]->(ancestor)
-        WITH node, score, collect(ancestor.fullPath) AS ancestors
-        
-        // 3. Get immediate children (if any)
-        OPTIONAL MATCH (node)<-[:CHILD_OF]-(child)
-        WITH node, score, ancestors, collect(child.fullPath) AS children
-        
-        // 4. Return everything
-        RETURN {
-            path: node.fullPath,
-            name: node.name,
-            description: node.description,
-            type: node.type,
-            defaultValue: node.defaultValue,
-            since: node.since,
-            samples: node.samples,
-            ancestors: ancestors,
-            children: children,
-            relevance: score
-        } AS result
-        ORDER BY score DESC
-        """
-        
-        results = self.driver.execute_query(
-            cypher,
-            query_embedding=query_embedding,
-            top_k=top_k
-        )
+        # Build results with context
+        results = []
+        for node_id, score in top_nodes:
+            node_data = self.graph.nodes[node_id]
+            
+            # Get ancestors (parents)
+            ancestors = list(nx.ancestors(self.graph, node_id))
+            
+            # Get children
+            children = list(self.graph.predecessors(node_id))  # predecessors because edges go child->parent
+            
+            result = {
+                'path': node_id,
+                'name': node_data['name'],
+                'description': node_data['description'],
+                'type': node_data['type'],
+                'defaultValue': node_data.get('defaultValue'),
+                'since': node_data.get('since'),
+                'samples': node_data.get('samples', []),
+                'ancestors': ancestors,
+                'children': children,
+                'relevance': float(score)
+            }
+            results.append(result)
         
         return results
     
-    def get_subgraph(self, property_path: str, depth: int = 2):
-        """
-        Get subgraph around a specific property
-        """
-        cypher = """
-        MATCH (center:Property {fullPath: $property_path})
+    def get_subgraph(self, property_path: str, depth: int = 2) -> Dict:
+        """Get subgraph around a specific property"""
+        if property_path not in self.graph:
+            return None
         
-        // Get ancestors
-        OPTIONAL MATCH (center)-[:CHILD_OF*1..3]->(ancestor)
+        center_data = self.graph.nodes[property_path]
         
-        // Get descendants
-        OPTIONAL MATCH (center)<-[:CHILD_OF*1..2]-(descendant)
+        # Get ancestors (up to depth levels)
+        ancestors = []
+        current = property_path
+        for _ in range(depth):
+            parents = list(self.graph.successors(current))
+            if parents:
+                ancestors.extend(parents)
+                current = parents[0]  # Follow first parent
+            else:
+                break
         
-        // Get siblings (same parent)
-        OPTIONAL MATCH (center)-[:CHILD_OF]->(parent)<-[:CHILD_OF]-(sibling)
-        WHERE sibling.id <> center.id
+        # Get descendants (down to depth levels)
+        descendants = []
+        for node in nx.descendants(self.graph, property_path):
+            if nx.shortest_path_length(self.graph, node, property_path) <= depth:
+                descendants.append(node)
         
-        RETURN {
-            center: {
-                path: center.fullPath,
-                name: center.name,
-                description: center.description,
-                type: center.type,
-                defaultValue: center.defaultValue
+        # Get siblings (nodes with same parent)
+        siblings = []
+        parents = list(self.graph.successors(property_path))
+        if parents:
+            siblings = [n for n in self.graph.predecessors(parents[0]) 
+                       if n != property_path]
+        
+        return {
+            'center': {
+                'path': property_path,
+                'name': center_data['name'],
+                'description': center_data['description'],
+                'type': center_data['type'],
+                'defaultValue': center_data.get('defaultValue')
             },
-            ancestors: collect(DISTINCT ancestor.fullPath),
-            descendants: collect(DISTINCT descendant.fullPath),
-            siblings: collect(DISTINCT sibling.fullPath)
-        } AS subgraph
-        """
-        
-        result = self.driver.execute_query(
-            cypher,
-            property_path=property_path
-        )
-        
-        return result
+            'ancestors': ancestors,
+            'descendants': descendants,
+            'siblings': siblings
+        }
 ```
 
-## Main Script
+## Updated main.py
 
 ```python
 # main.py
-from neo4j import GraphDatabase
 from graph_builder import SimpleHighchartsGraph
 from retriever import SimpleRetriever
-import json
 
 def main():
-    # 1. Load JSON
-    with open('highcharts_tree.json') as f:
-        tree = json.load(f)
+    # Build or load graph
+    builder = SimpleHighchartsGraph()
     
-    # 2. Connect to Neo4j
-    driver = GraphDatabase.driver(
-        "bolt://localhost:7687",
-        auth=("neo4j", "password")
-    )
+    # Option 1: Build from URL (first time)
+    tree_url = "https://api.highcharts.com/highcharts/tree.json"
+    builder.build_graph(tree_url)
+    builder.save("highcharts_graph.gpickle")  # Save for later
     
-    # 3. Build graph
-    print("Building graph...")
-    builder = SimpleHighchartsGraph(driver)
-    builder.build_graph(tree)
-    print("Graph built successfully!")
+    # Option 2: Load from file (subsequent runs)
+    # builder.load("highcharts_graph.gpickle")
     
-    # 4. Create vector index (run once)
-    print("Creating vector index...")
-    create_index = """
-    CREATE VECTOR INDEX property_embeddings IF NOT EXISTS
-    FOR (p:Property)
-    ON p.embedding
-    OPTIONS {
-      indexConfig: {
-        `vector.dimensions`: 1024,  // Update based on your embed() output
-        `vector.similarity_function`: 'cosine'
-      }
-    }
-    """
-    driver.execute_query(create_index)
-    print("Vector index created!")
-    
-    # 5. Query example
-    retriever = SimpleRetriever(driver)
+    # Query
+    retriever = SimpleRetriever(builder)
     
     user_query = "change grid line color to green"
-    print(f"\nSearching for: {user_query}")
+    print(f"\nSearching for: '{user_query}'")
     
     results = retriever.search(user_query, top_k=3)
     
-    for record in results:
-        result = record['result']
-        print(f"\n--- Result (relevance: {result['relevance']:.2f}) ---")
+    for i, result in enumerate(results, 1):
+        print(f"\n--- Result {i} (relevance: {result['relevance']:.3f}) ---")
         print(f"Path: {result['path']}")
         print(f"Description: {result['description']}")
         print(f"Type: {result['type']}")
         print(f"Default: {result['defaultValue']}")
-        print(f"Ancestors: {' > '.join(reversed(result['ancestors']))}")
-    
-    driver.close()
+        if result['ancestors']:
+            print(f"Parent chain: {' > '.join(reversed(result['ancestors']))}")
 
 if __name__ == "__main__":
     main()
 ```
 
-## Your utils/embed.py should look something like:
-
-```python
-# utils/embed.py
-# Example structure - adjust based on your actual implementation
-
-def embed(text: str) -> list:
-    """
-    Your custom embedding function.
-    Should return a list of floats (the embedding vector).
-    
-    Args:
-        text: Input text to embed
-        
-    Returns:
-        list: Embedding vector (e.g., length 1024 or 768)
-    """
-    # Your implementation here
-    # Could be OpenAI, Cohere, local model, etc.
-    pass
-```
-
-Make sure to update the `vector.dimensions` in the index creation to match your embed() function’s output dimension!​​​​​​​​​​​​​​​​
+This is **completely self-contained** - no database needed! Everything runs in memory and can be saved/loaded from a pickle file.​​​​​​​​​​​​​​​​
