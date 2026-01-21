@@ -1,293 +1,204 @@
-"""
-ReAct Agent Implementation using LangGraph (Latest API)
-A simple reasoning and acting agent that can use tools to answer questions.
-"""
-
-from typing import TypedDict, Annotated, Sequence
-import operator
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent
 import json
+import requests
+from typing import Dict, Any, List
+from pprint import pprint
 
-# Define the agent state
-class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+
+class HighchartsJSONParser:
+    """Class to fetch and parse Highcharts API JSON data."""
     
-# Define some example tools
-@tool
-def search_web(query: str) -> str:
-    """Search the web for information about a query."""
-    # This is a mock implementation - replace with actual web search
-    return f"Search results for '{query}': This is mock search data. In reality, this would return web search results."
-
-@tool
-def calculator(expression: str) -> str:
-    """Calculate mathematical expressions safely."""
-    try:
-        # Simple calculator - in production, use a safer evaluation method
-        result = eval(expression.replace('^', '**'))  # Handle exponents
-        return f"The result of {expression} is {result}"
-    except Exception as e:
-        return f"Error calculating {expression}: {str(e)}"
-
-@tool
-def get_weather(location: str) -> str:
-    """Get weather information for a location."""
-    # Mock weather data - replace with actual weather API
-    return f"Weather in {location}: Sunny, 72°F with light clouds"
-
-# Initialize the LLM and tools
-llm = ChatOpenAI(model="gpt-4", temperature=0)
-tools = [search_web, calculator, get_weather]
-
-# Method 1: Using the prebuilt create_react_agent (Simplest)
-def create_simple_react_agent():
-    """Create a ReAct agent using the prebuilt function."""
-    return create_react_agent(llm, tools)
-
-# Method 2: Custom implementation with latest API
-def create_custom_react_agent():
-    """Create a custom ReAct agent with full control."""
-    
-    # Bind tools to the LLM
-    llm_with_tools = llm.bind_tools(tools)
-    
-    def agent_node(state: AgentState):
-        """The main agent that decides whether to use tools or respond."""
-        messages = state["messages"]
-        response = llm_with_tools.invoke(messages)
-        return {"messages": [response]}
-    
-    def tool_node(state: AgentState):
-        """Execute the tools that the agent decided to use."""
-        messages = state["messages"]
-        last_message = messages[-1]
+    def __init__(self, url: str = "https://api.highcharts.com/highcharts/tree.json"):
+        """
+        Initialize the parser with the API URL.
         
-        # Execute each tool call
-        tool_messages = []
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            for tool_call in last_message.tool_calls:
-                # Find the tool by name
-                selected_tool = None
-                for tool in tools:
-                    if tool.name == tool_call["name"]:
-                        selected_tool = tool
-                        break
-                
-                if selected_tool:
-                    try:
-                        # Invoke the tool directly
-                        tool_result = selected_tool.invoke(tool_call["args"])
-                        
-                        # Create tool message
-                        tool_message = ToolMessage(
-                            content=str(tool_result),
-                            tool_call_id=tool_call["id"]
-                        )
-                        tool_messages.append(tool_message)
-                        
-                    except Exception as e:
-                        # Handle tool execution errors
-                        error_message = ToolMessage(
-                            content=f"Error executing {tool_call['name']}: {str(e)}",
-                            tool_call_id=tool_call["id"]
-                        )
-                        tool_messages.append(error_message)
+        Args:
+            url: The URL to fetch JSON data from
+        """
+        self.url = url
+        self.data = None
+    
+    def fetch_data(self) -> Dict[str, Any]:
+        """
+        Fetch JSON data from the API endpoint.
         
-        return {"messages": tool_messages}
-    
-    def should_continue(state: AgentState) -> str:
-        """Determine if we should continue with tool execution or end."""
-        messages = state["messages"]
-        last_message = messages[-1]
-        
-        # If there are tool calls, execute tools
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-            return "tools"
-        # Otherwise, end the conversation
-        return END
-    
-    # Create the graph
-    workflow = StateGraph(AgentState)
-    
-    # Add nodes
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", tool_node)
-    
-    # Set entry point
-    workflow.set_entry_point("agent")
-    
-    # Add edges
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {
-            "tools": "tools",
-            END: END
-        }
-    )
-    workflow.add_edge("tools", "agent")
-    
-    return workflow.compile()
-
-# Helper function to run the agent
-def run_react_agent(query: str, use_prebuilt: bool = True) -> str:
-    """Run the ReAct agent with a query."""
-    print(f"\n🤖 User Query: {query}")
-    print("=" * 50)
-    
-    # Choose which agent to use
-    if use_prebuilt:
-        app = create_simple_react_agent()
-        print("Using prebuilt ReAct agent")
-    else:
-        app = create_custom_react_agent()
-        print("Using custom ReAct agent")
-    
-    # Initialize the state
-    initial_state = {
-        "messages": [HumanMessage(content=query)]
-    }
-    
-    # Run the agent
-    result = app.invoke(initial_state)
-    
-    # Print the reasoning process
-    print("\n💭 Agent Reasoning Process:")
-    for i, message in enumerate(result["messages"]):
-        if isinstance(message, HumanMessage):
-            print(f"  Human: {message.content}")
-        elif isinstance(message, AIMessage):
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                print(f"  Agent: I need to use tools to answer this.")
-                for tool_call in message.tool_calls:
-                    print(f"    🔧 Calling {tool_call['name']} with: {tool_call['args']}")
-            else:
-                print(f"  Agent: {message.content}")
-        elif isinstance(message, ToolMessage):
-            print(f"    📋 Tool result: {message.content}")
-    
-    # Extract and return the final response
-    final_message = result["messages"][-1]
-    return final_message.content if hasattr(final_message, 'content') else str(final_message)
-
-# Streaming version for real-time output
-def run_react_agent_streaming(query: str, use_prebuilt: bool = True):
-    """Run the ReAct agent with streaming output."""
-    print(f"\n🤖 User Query: {query}")
-    print("=" * 50)
-    
-    # Choose which agent to use
-    if use_prebuilt:
-        app = create_simple_react_agent()
-    else:
-        app = create_custom_react_agent()
-    
-    # Initialize the state
-    initial_state = {
-        "messages": [HumanMessage(content=query)]
-    }
-    
-    print("\n💭 Agent Process (Streaming):")
-    
-    # Stream the execution
-    for chunk in app.stream(initial_state):
-        for node_name, node_output in chunk.items():
-            print(f"\n--- {node_name.upper()} ---")
-            for message in node_output.get("messages", []):
-                if isinstance(message, HumanMessage):
-                    print(f"Human: {message.content}")
-                elif isinstance(message, AIMessage):
-                    if hasattr(message, 'tool_calls') and message.tool_calls:
-                        print("Agent: Planning to use tools...")
-                        for tool_call in message.tool_calls:
-                            print(f"  🔧 {tool_call['name']}: {tool_call['args']}")
-                    else:
-                        print(f"Agent: {message.content}")
-                elif isinstance(message, ToolMessage):
-                    print(f"Tool Result: {message.content}")
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Set your OpenAI API key
-    import os
-    # os.environ["OPENAI_API_KEY"] = "your-api-key-here"
-    
-    # Test queries that demonstrate ReAct pattern
-    test_queries = [
-        "What's the weather like in New York?",
-        "Calculate 25 * 47 + 123",
-        "Search for information about Python programming",
-        "What's 15% of 240 and what's the weather in London?"
-    ]
-    
-    print("🚀 ReAct Agent Demo (Latest LangGraph API)")
-    print("This agent can reason about queries and use tools when needed.\n")
-    
-    for query in test_queries[:2]:  # Test first 2 queries
+        Returns:
+            Parsed JSON data as a dictionary
+            
+        Raises:
+            requests.RequestException: If the request fails
+            json.JSONDecodeError: If the response is not valid JSON
+        """
         try:
-            print(f"\n{'='*70}")
-            print("TESTING WITH PREBUILT AGENT:")
-            response = run_react_agent(query, use_prebuilt=True)
-            print(f"\n✅ Final Answer: {response}")
+            print(f"Fetching data from {self.url}...")
+            response = requests.get(self.url, timeout=30)
+            response.raise_for_status()  # Raise an error for bad status codes
             
-            print(f"\n{'='*70}")
-            print("TESTING WITH CUSTOM AGENT:")
-            response = run_react_agent(query, use_prebuilt=False)
-            print(f"\n✅ Final Answer: {response}")
+            self.data = response.json()
+            print(f"Successfully fetched {len(str(self.data))} characters of JSON data")
+            return self.data
             
-            print(f"\n{'='*70}")
-            print("TESTING STREAMING VERSION:")
-            run_react_agent_streaming(query, use_prebuilt=True)
-            
-            print("\n" + "="*70)
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            print("Make sure to set your OPENAI_API_KEY environment variable")
-            break
-
-# Additional utility: Interactive mode
-def interactive_mode():
-    """Run the agent in interactive mode."""
-    print("\n🎮 Interactive ReAct Agent")
-    print("Type 'quit' to exit, 'custom' to switch to custom agent, 'prebuilt' for prebuilt agent")
-    print("Current mode: prebuilt\n")
+        except requests.RequestException as e:
+            print(f"Error fetching data: {e}")
+            raise
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON: {e}")
+            raise
     
-    use_prebuilt = True
+    def get_metadata(self) -> Dict[str, Any]:
+        """
+        Extract metadata from the JSON response.
+        
+        Returns:
+            Dictionary containing metadata information
+        """
+        if not self.data:
+            self.fetch_data()
+        
+        return self.data.get('_meta', {})
     
-    while True:
-        query = input("👤 You: ").strip()
+    def get_all_options(self) -> List[str]:
+        """
+        Get a list of all top-level option keys.
         
-        if query.lower() in ['quit', 'exit', 'q']:
-            print("👋 Goodbye!")
-            break
-        elif query.lower() == 'custom':
-            use_prebuilt = False
-            print("🔧 Switched to custom agent")
-            continue
-        elif query.lower() == 'prebuilt':
-            use_prebuilt = True
-            print("⚡ Switched to prebuilt agent")
-            continue
-        elif query.lower() == 'stream':
-            query = input("Enter query for streaming: ").strip()
-            if query:
-                try:
-                    run_react_agent_streaming(query, use_prebuilt)
-                except Exception as e:
-                    print(f"❌ Error: {e}")
-            continue
+        Returns:
+            List of option names
+        """
+        if not self.data:
+            self.fetch_data()
         
-        if query:
-            try:
-                response = run_react_agent(query, use_prebuilt)
-                print(f"\n🤖 Agent: {response}\n")
-            except Exception as e:
-                print(f"❌ Error: {e}")
-                print("Make sure to set your OPENAI_API_KEY environment variable\n")
+        # Exclude metadata key
+        return [key for key in self.data.keys() if key != '_meta']
+    
+    def get_option(self, option_name: str) -> Dict[str, Any]:
+        """
+        Get details for a specific option.
+        
+        Args:
+            option_name: The name of the option to retrieve
+            
+        Returns:
+            Dictionary containing option details
+        """
+        if not self.data:
+            self.fetch_data()
+        
+        return self.data.get(option_name, {})
+    
+    def search_options(self, search_term: str) -> List[str]:
+        """
+        Search for options containing the search term.
+        
+        Args:
+            search_term: Term to search for in option names
+            
+        Returns:
+            List of matching option names
+        """
+        if not self.data:
+            self.fetch_data()
+        
+        search_lower = search_term.lower()
+        return [key for key in self.data.keys() 
+                if search_lower in key.lower() and key != '_meta']
+    
+    def explore_nested_structure(self, data: Dict = None, 
+                                  level: int = 0, max_level: int = 2) -> None:
+        """
+        Recursively explore the nested structure of the JSON data.
+        
+        Args:
+            data: Data to explore (defaults to root data)
+            level: Current nesting level
+            max_level: Maximum depth to explore
+        """
+        if data is None:
+            data = self.data
+        
+        if level > max_level:
+            return
+        
+        indent = "  " * level
+        
+        for key, value in data.items():
+            if isinstance(value, dict):
+                print(f"{indent}{key}: {{...}}")
+                if 'children' in value:
+                    self.explore_nested_structure(value['children'], level + 1, max_level)
+            elif isinstance(value, list):
+                print(f"{indent}{key}: [{len(value)} items]")
+            else:
+                print(f"{indent}{key}: {value}")
+    
+    def save_to_file(self, filename: str = "highcharts_data.json") -> None:
+        """
+        Save the fetched JSON data to a file.
+        
+        Args:
+            filename: Name of the file to save to
+        """
+        if not self.data:
+            self.fetch_data()
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+        
+        print(f"Data saved to {filename}")
 
-# Uncomment to run interactive mode:
-# interactive_mode()
+
+def main():
+    """Main function demonstrating the parser usage."""
+    
+    # Initialize parser
+    parser = HighchartsJSONParser()
+    
+    # Fetch data
+    try:
+        parser.fetch_data()
+    except Exception as e:
+        print(f"Failed to fetch data: {e}")
+        return
+    
+    print("\n" + "="*60)
+    print("METADATA")
+    print("="*60)
+    metadata = parser.get_metadata()
+    pprint(metadata)
+    
+    print("\n" + "="*60)
+    print("ALL TOP-LEVEL OPTIONS")
+    print("="*60)
+    options = parser.get_all_options()
+    print(f"Found {len(options)} options:")
+    for i, option in enumerate(options[:10], 1):  # Show first 10
+        print(f"{i}. {option}")
+    if len(options) > 10:
+        print(f"... and {len(options) - 10} more")
+    
+    print("\n" + "="*60)
+    print("EXAMPLE: ACCESSIBILITY OPTION")
+    print("="*60)
+    accessibility = parser.get_option('accessibility')
+    if accessibility:
+        print("\nAccessibility option structure:")
+        if 'doclet' in accessibility:
+            print(f"\nDescription: {accessibility['doclet'].get('description', 'N/A')[:200]}...")
+        if 'children' in accessibility:
+            print(f"\nChild options: {list(accessibility['children'].keys())[:5]}...")
+    
+    print("\n" + "="*60)
+    print("SEARCH EXAMPLE: Options containing 'chart'")
+    print("="*60)
+    chart_options = parser.search_options('chart')
+    print(f"Found {len(chart_options)} options:")
+    for option in chart_options[:5]:
+        print(f"  - {option}")
+    
+    # Optional: Save to file
+    print("\n" + "="*60)
+    save_option = input("\nSave data to file? (y/n): ").strip().lower()
+    if save_option == 'y':
+        parser.save_to_file()
+
+
+if __name__ == "__main__":
+    main()
