@@ -1,840 +1,109 @@
-awesome — here’s a clean, production-ready Part-1 ingestion pack with four files:
-	•	load_files.py → walks your data/ tree, reads .txt/.md (and optionally .pdf if you want), emits RawDoc
-	•	normalize.py → Unicode/whitespace normalization, markdown → plain-text, heading extraction, emits NormalizedDoc
-	•	chunk.py → heading-aware, token-aware chunking (tiktoken fallback included), emits Chunk
-	•	embed.py → OpenAI embeddings via LangChain (async + sync), emits (chunk, embedding) pairs
-
-All files use strict type hints and small, well-documented APIs so you can drop them in.
-
-⸻
-```
-load_files.py
-
-# src/ingestion/load_files.py
-from __future__ import annotations
-from pathlib import Path
-from typing import Iterator, Literal, TypedDict, Dict, Any, Optional
-import hashlib
-import datetime as dt
-
-SourceType = Literal["txt", "md", "pdf", "transcript", "webinar", "audio", "other"]
-
-class RawDoc(TypedDict):
-    doc_id: str                 # stable id (hash-based)
-    source_type: SourceType
-    source_path: str            # absolute or relative path
-    created_at: str             # ISO8601
-    updated_at: str             # ISO8601
-    text: str                   # raw text payload
-    metadata: Dict[str, Any]    # free-form: url, heading_path, page_or_time, etc.
-
-def _iso(ts: float) -> str:
-    return dt.datetime.fromtimestamp(ts).isoformat(timespec="seconds")
-
-def _hash(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8", "ignore")).hexdigest()[:16]
-
-def _guess_source_type(p: Path) -> SourceType:
-    ext = p.suffix.lower()
-    if ext in {".txt"}: return "txt"
-    if ext in {".md", ".markdown"}: return "md"
-    if ext in {".pdf"}: return "pdf"
-    # folder hints (optional)
-    hint = p.as_posix().lower()
-    if "transcript" in hint: return "transcript"
-    if "webinar" in hint: return "webinar"
-    if "audio" in hint: return "audio"
-    return "other"
-
-def _read_text(p: Path) -> Optional[str]:
-    try:
-        return p.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        # last-resort binary decode
-        return p.read_bytes().decode("utf-8", "ignore")
-
-def walk_data_dir(root: str | Path, include_pdf: bool = False) -> Iterator[RawDoc]:
-    """
-    Recursively yields RawDoc from a content directory.
-    - Supports .txt/.md by default; .pdf if include_pdf=True (you'll convert to text later).
-    - You may pre-convert PDFs to .txt for homogeneity; keep original path in metadata.
-    """
-    root = Path(root)
-    assert root.exists(), f"Path not found: {root}"
-
-    patterns = ["**/*.txt", "**/*.md"]
-    if include_pdf:
-        patterns.append("**/*.pdf")
-
-    for pat in patterns:
-        for p in root.glob(pat):
-            if p.is_dir():  # skip dirs
-                continue
-            st = p.stat()
-            src_type = _guess_source_type(p)
-            if p.suffix.lower() == ".pdf" and not include_pdf:
-                continue
-
-            if p.suffix.lower() in {".txt", ".md"}:
-                text = _read_text(p) or ""
-            else:
-                # Minimal PDF placeholder; prefer pre-converted .txt
-                # (You can plug in PyPDF here if desired.)
-                text = ""
-
-            doc_id = f"{p.stem}-{_hash(str(p.resolve()))}"
-            yield RawDoc(
-                doc_id=doc_id,
-                source_type=src_type,
-                source_path=str(p),
-                created_at=_iso(st.st_ctime),
-                updated_at=_iso(st.st_mtime),
-                text=text,
-                metadata={
-                    "heading_path": [],
-                    "page_or_time": None,
-                    "original_ext": p.suffix.lower(),
-                },
-            )
-
-```
-⸻
-```
-normalize.py
-
-# src/ingestion/normalize.py
-from __future__ import annotations
-import re
-import unicodedata
-from typing import List, Dict, Any, TypedDict
-from .load_files import RawDoc
-
-class Heading(TypedDict):
-    level: int
-    title: str
-    start_char: int
-
-class NormalizedDoc(TypedDict):
-    doc_id: str
-    text: str                 # clean, plain text
-    headings: List[Heading]   # detected markdown-ish headings (optional)
-    metadata: Dict[str, Any]  # carried forward + normalization notes
-
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
-
-def _strip_markdown(md: str) -> tuple[str, List[Heading]]:
-    """
-    Converts markdown to plain-ish text while capturing headings.
-    - Strips code fences, inline code, images; keeps link text.
-    """
-    s = md
-
-    # Remove fenced code blocks
-    s = re.sub(r"```.*?```", "", s, flags=re.DOTALL)
-
-    # Inline code → text
-    s = re.sub(r"`([^`]+)`", r"\1", s)
-
-    # Images ![alt](url) → alt
-    s = re.sub(r"!$begin:math:display$([^$end:math:display$]*)\]$begin:math:text$[^)]+$end:math:text$", r"\1", s)
-
-    # Links [text](url) → text
-    s = re.sub(r"$begin:math:display$([^$end:math:display$]+)\]$begin:math:text$[^)]+$end:math:text$", r"\1", s)
-
-    # Extract headings
-    headings: List[Heading] = []
-    for m in _HEADING_RE.finditer(s):
-        level = len(m.group(1))
-        title = m.group(2).strip()
-        headings.append({"level": level, "title": title, "start_char": m.start()})
-
-    # Remove leading hashes from headings in body
-    s = re.sub(r"^#{1,6}\s+", "", s, flags=re.MULTILINE)
-
-    return s, headings
-
-def _normalize_text(t: str) -> str:
-    # Unicode NFC
-    t = unicodedata.normalize("NFC", t)
-    # Replace weird NBSPs / zero-width / smart quotes minimal
-    t = t.replace("\u00A0", " ").replace("\u200B", "")
-    # Normalize line endings
-    t = t.replace("\r\n", "\n").replace("\r", "\n")
-    # Collapse trailing spaces
-    t = re.sub(r"[ \t]+$", "", t, flags=re.MULTILINE)
-    # Collapse 3+ newlines → 2
-    t = re.sub(r"\n{3,}", "\n\n", t)
-    # Trim
-    return t.strip()
-
-def normalize_rawdoc(doc: RawDoc) -> NormalizedDoc:
-    """
-    Converts RawDoc into NormalizedDoc:
-      - Unicode + whitespace normalization
-      - Markdown → text (if needed)
-      - Captures headings (level, title, start_char)
-    """
-    text = doc["text"] or ""
-    headings: List[Heading] = []
-
-    if doc["source_type"] == "md":
-        text, headings = _strip_markdown(text)
-
-    # (Optional) transcripts timestamp keeper — keep as-is but normalized
-    # Example timestamps like [00:01:23] will be preserved.
-
-    norm = _normalize_text(text)
-
-    metadata = dict(doc["metadata"])
-    metadata.update({
-        "normalized": True,
-        "source_type": doc["source_type"],
-        "source_path": doc["source_path"],
-        "created_at": doc["created_at"],
-        "updated_at": doc["updated_at"],
-    })
-
-    return NormalizedDoc(
-        doc_id=doc["doc_id"],
-        text=norm,
-        headings=headings,
-        metadata=metadata,
-    )
-```
-
-⸻
-```
-chunk.py
-
-# src/ingestion/chunk.py
-from __future__ import annotations
-from typing import Iterator, List, Dict, Any, TypedDict, Optional
-import re
-
-try:
-    import tiktoken
-    _ENC = tiktoken.get_encoding("cl100k_base")
-except Exception:
-    _ENC = None
-
-from .normalize import NormalizedDoc, Heading
-
-class Chunk(TypedDict):
-    chunk_id: str
-    doc_id: str
-    ordinal: int
-    text: str
-    heading_path: List[str]
-    start_char: int
-    end_char: int
-    page_or_time: Optional[Dict[str, Any]]
-    metadata: Dict[str, Any]
-
-def _token_len(s: str) -> int:
-    if _ENC:
-        try:
-            return len(_ENC.encode(s))
-        except Exception:
-            pass
-    # Fallback heuristic ~ 4 chars/token
-    return max(1, len(s) // 4)
-
-def _pack_by_tokens(paras: List[str], max_tokens: int, overlap_tokens: int) -> List[str]:
-    """Greedy packer over paragraphs with token-based length target + overlap."""
-    out: List[str] = []
-    cur: List[str] = []
-    cur_tokens = 0
-    for p in paras:
-        ptok = _token_len(p)
-        if cur_tokens + ptok <= max_tokens or not cur:
-            cur.append(p)
-            cur_tokens += ptok
-        else:
-            out.append("\n\n".join(cur))
-            # overlap: take tail paragraphs until overlap_tokens reached
-            tail: List[str] = []
-            tail_tokens = 0
-            for para in reversed(cur):
-                t = _token_len(para)
-                if tail_tokens + t > overlap_tokens: break
-                tail_tokens += t
-                tail.insert(0, para)
-            cur = tail + [p]
-            cur_tokens = sum(_token_len(x) for x in cur)
-    if cur:
-        out.append("\n\n".join(cur))
-    return out
-
-def _split_into_sections(text: str, headings: List[Heading]) -> List[Dict[str, Any]]:
-    """
-    Splits by detected headings (level 1-3) to keep local context; falls back to full text.
-    Returns list of {'title': str, 'start': int, 'end': int, 'body': str, 'path': [..]}
-    """
-    if not headings:
-        return [{"title": "", "start": 0, "end": len(text), "body": text, "path": []}]
-
-    # Use only top-ish headings to segment
-    anchors = [{"idx": h["start_char"], "title": h["title"], "level": h["level"]} for h in headings]
-    anchors.sort(key=lambda x: x["idx"])
-    sections = []
-    for i, a in enumerate(anchors):
-        start = a["idx"]
-        end = anchors[i + 1]["idx"] if i + 1 < len(anchors) else len(text)
-        body = text[start:end].strip()
-        # Build simple path: all previous titles with lower level
-        path = [a["title"]]
-        sections.append({"title": a["title"], "start": start, "end": end, "body": body, "path": path})
-    return sections
-
-def chunk_document(
-    doc: NormalizedDoc,
-    max_tokens: int = 350,
-    overlap_tokens: int = 60,
-) -> Iterator[Chunk]:
-    """
-    Inputs:
-      - doc: NormalizedDoc
-      - max_tokens: desired target per chunk (token-aware)
-      - overlap_tokens: tail overlap between consecutive chunks
-    Yields:
-      - Chunk dict with stable 'chunk_id' = f"{doc_id}-{ordinal}"
-    """
-    text = doc["text"]
-    # Paragraph split: preserve double newlines as boundaries
-    # Before packing, create sections around headings for better locality
-    sections = _split_into_sections(text, doc.get("headings", []))
-
-    ordinal = 0
-    for sec in sections:
-        body = sec["body"]
-        # naïve paragraph split
-        paras = [p.strip() for p in body.split("\n\n") if p.strip()]
-        if not paras: continue
-
-        packed = _pack_by_tokens(paras, max_tokens=max_tokens, overlap_tokens=overlap_tokens)
-
-        # Compute char spans approximately by searching substrings sequentially
-        cursor = sec["start"]
-        for piece in packed:
-            # find piece in original slice
-            rel = text.find(piece, cursor, sec["end"])
-            start = rel if rel != -1 else cursor
-            end = start + len(piece)
-            heading_path = [h for h in sec.get("path", [])]
-            chunk: Chunk = {
-                "chunk_id": f"{doc['doc_id']}-{ordinal}",
-                "doc_id": doc["doc_id"],
-                "ordinal": ordinal,
-                "text": piece,
-                "heading_path": heading_path,
-                "start_char": start,
-                "end_char": end,
-                "page_or_time": doc["metadata"].get("page_or_time"),
-                "metadata": {
-                    **doc["metadata"],
-                    "heading_path": heading_path,
-                },
-            }
-            yield chunk
-            ordinal += 1
-            cursor = end
-
-```
-⸻
-```
-embed.py
-
-# src/ingestion/embed.py
-from __future__ import annotations
-from typing import Sequence, List, Dict, TypedDict, Optional
-from langchain_openai import OpenAIEmbeddings
-
-from .chunk import Chunk
-
-class EmbeddingRecord(TypedDict):
-    chunk_id: str
-    doc_id: str
-    embedding: List[float]
-    text: str
-    metadata: Dict
-
-class Embedder:
-    """
-    Thin wrapper over LangChain's OpenAIEmbeddings with async + sync helpers.
-    """
-    def __init__(self, model: str = "text-embedding-3-large"):
-        self.model = model
-        self._emb = OpenAIEmbeddings(model=model)
-
-    # ---------- batch APIs ----------
-    async def aembed_texts(self, texts: Sequence[str]) -> List[List[float]]:
-        """
-        Input: list[str]
-        Output: list[list[float]] in same order
-        """
-        return await self._emb.aembed_documents(list(texts))
-
-    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
-        """
-        Synchronous fallback (uses .embed_documents under the hood).
-        """
-        return self._emb.embed_documents(list(texts))
-
-    async def aembed_query(self, text: str) -> List[float]:
-        return (await self.aembed_texts([text]))[0]
-
-    def embed_query(self, text: str) -> List[float]:
-        return self.embed_texts([text])[0]
-
-# --------- high-level helper ----------
-async def aembed_chunks(chunks: Sequence[Chunk], embedder: Optional[Embedder] = None) -> List[EmbeddingRecord]:
-    """
-    Asynchronously embeds chunks and returns records ready for upsert.
-    Input:
-      - chunks: Sequence[Chunk]
-      - embedder: optional Embedder (created if None)
-    Output:
-      - List[EmbeddingRecord]: {'chunk_id','doc_id','embedding','text','metadata'}
-    """
-    emb = embedder or Embedder()
-    texts = [c["text"] for c in chunks]
-    vecs = await emb.aembed_texts(texts)
-    out: List[EmbeddingRecord] = []
-    for c, v in zip(chunks, vecs):
-        out.append({
-            "chunk_id": c["chunk_id"],
-            "doc_id": c["doc_id"],
-            "embedding": v,
-            "text": c["text"],
-            "metadata": c["metadata"],
-        })
-    return out
-
-def embed_chunks(chunks: Sequence[Chunk], embedder: Optional[Embedder] = None) -> List[EmbeddingRecord]:
-    """
-    Synchronous variant of aembed_chunks().
-    """
-    emb = embedder or Embedder()
-    texts = [c["text"] for c in chunks]
-    vecs = emb.embed_texts(texts)
-    return [{
-        "chunk_id": c["chunk_id"],
-        "doc_id": c["doc_id"],
-        "embedding": v,
-        "text": c["text"],
-        "metadata": c["metadata"],
-    } for c, v in zip(chunks, vecs)]
-```
+Here’s a fresh, research-backed “reading + implementation” pack (late-2025 → early-2026) that maps directly onto the core pillars of Jarvis. I’m prioritizing papers that (a) are very recent, (b) are immediately actionable, and (c) cover the failure modes that kill agent products in the wild (latency, cost, security, long-horizon reliability).
 
 ⸻
 
-How they fit together (mini driver)
-```
-# scripts/example_ingest_driver.py (optional helper to see flow)
-import asyncio
-from pathlib import Path
-from src.ingestion.load_files import walk_data_dir
-from src.ingestion.normalize import normalize_rawdoc
-from src.ingestion.chunk import chunk_document
-from src.ingestion.embed import aembed_chunks
+A) Long-horizon “Software Factory” that finishes (and doesn’t burn money)
 
-async def run():
-    docs = [normalize_rawdoc(d) for d in walk_data_dir("data")]
-    for nd in docs:
-        chunks = list(chunk_document(nd, max_tokens=350, overlap_tokens=60))
-        records = await aembed_chunks(chunks)   # -> ready to upsert to pgvector
-        print(nd["doc_id"], len(records), "chunks embedded")
+1) BOAD (Dec 2025) — learn the best org chart, don’t guess it
 
-if __name__ == "__main__":
-    asyncio.run(run())
+Why it matters: it formalizes discovering a good hierarchy (orchestrator + subagents) using multi-armed bandits, and reports strong results on SWE-bench variants (incl. OOD SWE-bench-Live).
+How you use it in Jarvis: start with your PM→TL→Dev→QA→Sec flow, then learn routing: which sub-agent sequences work best for bugfix vs feature vs refactor, and when to invoke expensive steps.  ￼
 
-```
+2) SWE-Replay (Jan 2026) — trajectory replay/branching to cut cost without losing quality
+
+Why it matters: test-time scaling is expensive if you “resample from scratch.” SWE-Replay reuses prior trajectories and branches at meaningful intermediate states.
+How you use it: build a debug-trajectory cache keyed by repo state + failure signature + test output; when similar failures happen, Jarvis “replays” the successful exploration path instead of re-exploring.  ￼
+
+3) SWE-Universe (Feb 2026) — millions of verifiable SWE environments + “in-loop hacking detection”
+
+Why it matters: it’s about scaling verifiable environments from GitHub PRs, dealing with build yield, verifiers, cost, and explicitly mentions self-verification + hacking detection during environment construction.
+How you use it: (later) for Jarvis “learning”: generate a large pool of realistic, verifiable tasks and train internal policies (routing, patching, tool-usage) safely in sandboxes.  ￼
+
 ⸻
 
-if you want, I can add the pgvector “upsert” function next (with SQLAlchemy), or slot these into your build_index.py pipeline you already have.
+B) “Body” (computer-use / tool-use) that is reliable and fast
 
+4) OSWorld-Human (Jun 2025) — latency is the real bottleneck, not accuracy
 
-```python
-# pg_vector_store.py
+Why it matters: shows planning/reflection dominates latency, and steps get slower over time as history grows; provides human trajectories to measure “wasted steps.”
+How you use it: make efficiency a product KPI (steps-over-human, time-per-step, tool-call rate), enforce state compression, and cap reflection tokens.  ￼
 
-# psycopg + pgvector upsert / schema helpers
-from __future__ import annotations
-from typing import Iterable, List, Dict, Any, Optional, Sequence, Tuple
-import os
-import psycopg
-from psycopg.rows import dict_row
-from psycopg.types.json import Json
-from psycopg import sql
-from .embed import EmbeddingRecord
+5) OSWorld-MCP (Oct 2025) — tool invocation is now benchmarked
 
-DEFAULT_DIM = int(os.getenv("EMBED_DIM", "3072"))
+Why it matters: evaluates tool invocation + GUI together; finds tools help but models often under-invoke them.
+How you use it: treat “when to call tools” as a first-class policy with budgets + forced tool checks at gates (e.g., always run tests before “done”).  ￼
 
-def dsn_from_env() -> str:
-    host = os.getenv("PG_HOST", "localhost")
-    port = os.getenv("PG_PORT", "5432")
-    db   = os.getenv("PG_DB",   "invest_chat")
-    usr  = os.getenv("PG_USER", "postgres")
-    pwd  = os.getenv("PG_PASSWORD", "postgres")
-    return f"host={host} port={port} dbname={db} user={usr} password={pwd}"
+6) Agent S2 (Apr 2025) — split generalist vs specialists for grounding + planning
 
-def vector_literal(vec: Sequence[float]) -> str:
-    # pgvector accepts string form: '[0.1,0.2,...]'
-    return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+Why it matters: proposes compositional generalist/specialist separation (better grounding + hierarchical planning).
+How you use it: implement Jarvis “Body” as three roles: (1) perception/grounding (VLM), (2) planner, (3) executor, with cached perception and minimal re-reads.  ￼
 
-class PGVectorStore:
-    """
-    Minimal pgvector store using psycopg3
-    Table schema (recommended fresh setup):
+7) OpenAI CUA (Operator baseline) — what “operator-class” looks like
 
-    CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE TABLE IF NOT EXISTS chunks(
-      chunk_id TEXT PRIMARY KEY,
-      doc_id   TEXT,
-      text     TEXT,
-      source_type TEXT,
-      source_path TEXT,
-      heading_path JSONB,
-      page_or_time JSONB,
-      metadata JSONB,
-      embedding vector(<DIM>)
-    );
-    CREATE INDEX IF NOT EXISTS chunks_embedding_ivfflat
-      ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists=100);
-    """
-    def __init__(self, dsn: Optional[str] = None, embed_dim: int = DEFAULT_DIM):
-        self.dsn = dsn or dsn_from_env()
-        self.embed_dim = embed_dim
+Why it matters: gives a concrete reference for OSWorld/WebArena/WebVoyager performance claims and constraints.
+How you use it: use it as your north-star baseline for computer-use flows, but keep Jarvis local-first + permissioned.  ￼
 
-    def connect(self):
-        return psycopg.connect(self.dsn, row_factory=dict_row)
+⸻
 
-    def ensure_schema(self):
-        ddl = f"""
-        CREATE EXTENSION IF NOT EXISTS vector;
-        CREATE TABLE IF NOT EXISTS chunks(
-          chunk_id TEXT PRIMARY KEY,
-          doc_id   TEXT,
-          text     TEXT,
-          source_type TEXT,
-          source_path TEXT,
-          heading_path JSONB,
-          page_or_time JSONB,
-          metadata JSONB,
-          embedding vector({self.embed_dim})
-        );
-        """
-        with self.connect() as conn, conn.cursor() as cur:
-            cur.execute(ddl)
-            # Build ANN index (ivfflat) if missing
-            cur.execute("""
-                DO $$
-                BEGIN
-                  IF NOT EXISTS (
-                    SELECT 1 FROM pg_class c
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE c.relname = 'chunks_embedding_ivfflat'
-                  ) THEN
-                    EXECUTE 'CREATE INDEX chunks_embedding_ivfflat
-                             ON chunks USING ivfflat (embedding vector_cosine_ops)
-                             WITH (lists=100)';
-                  END IF;
-                END $$;
-            """)
-            # Optional text search index (uncomment if you want sparse search baseline)
-            # cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
-            # cur.execute("CREATE INDEX IF NOT EXISTS chunks_text_gin ON chunks USING gin (to_tsvector('english', text));")
-            conn.commit()
+C) Graph Memory & multimodal “mind map” that stays true (with provenance + time)
 
-    def upsert_batch(self, records: Sequence[EmbeddingRecord], batch_size: int = 500):
-        """
-        INSERT ... ON CONFLICT (chunk_id) DO UPDATE.
-        The vector is passed as a string literal cast to ::vector.
-        """
-        if not records:
-            return 0
-        inserted = 0
-        template = "(%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)"
-        sql_stmt = """
-        INSERT INTO chunks
-        (chunk_id, doc_id, text, source_type, source_path, heading_path, page_or_time, metadata, embedding)
-        VALUES %s
-        ON CONFLICT (chunk_id) DO UPDATE SET
-          doc_id = EXCLUDED.doc_id,
-          text   = EXCLUDED.text,
-          source_type = EXCLUDED.source_type,
-          source_path = EXCLUDED.source_path,
-          heading_path = EXCLUDED.heading_path,
-          page_or_time = EXCLUDED.page_or_time,
-          metadata = EXCLUDED.metadata,
-          embedding = EXCLUDED.embedding;
-        """
-        from psycopg.extras import execute_values
+8) Query-Driven Multimodal GraphRAG (ACL Findings 2025) — dynamic query-local graphs from multimodal evidence
 
-        with self.connect() as conn, conn.cursor() as cur:
-            for i in range(0, len(records), batch_size):
-                batch = records[i:i+batch_size]
-                values = []
-                for r in batch:
-                    md = r.get("metadata", {}) or {}
-                    values.append((
-                        r["chunk_id"],
-                        r["doc_id"],
-                        r["text"],
-                        md.get("source_type"),
-                        md.get("source_path"),
-                        Json(md.get("heading_path", [])),
-                        Json(md.get("page_or_time")),
-                        Json(md),
-                        vector_literal(r["embedding"]),   # casted in template
-                    ))
-                execute_values(cur, sql_stmt, values, template=template, page_size=batch_size)
-                inserted += len(batch)
-            conn.commit()
-        return inserted
+Why it matters: directly supports your “global graph + query-local subgraph” approach, and treats multimodal inputs (screenshots/diagrams) as first-class.
+How you use it: don’t precompute everything forever; build/refresh query-local subgraphs on demand, and attach every node/edge to evidence (span/page/bbox).  ￼
 
-    # (Optional) quick cosine ANN search to sanity-check index
-    def search_by_vector(self, qvec: Sequence[float], k: int = 12) -> List[Dict[str, Any]]:
-        qlit = vector_literal(qvec)
-        with self.connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT chunk_id, doc_id, text, source_path, metadata,
-                       1 - (embedding <=> %s::vector) AS score
-                FROM chunks
-                ORDER BY embedding <-> %s::vector
-                LIMIT %s;
-                """, (qlit, qlit, k)
-            )
-            return cur.fetchall()
+9) Zep / Graphiti (Jan 2025) — temporal knowledge graph for agent memory
 
-```
-## scripts/build_index.py
+Why it matters: explicitly focuses on temporally-aware KG memory (historical relationships), evaluated on long-memory tasks.
+How you use it: your memory schema should include valid_from/valid_to, “decision versions,” and “claim conflict sets,” so Jarvis can answer “what changed since last week?” not just “what is true.”  ￼
 
-```python
-# Build the pgvector index from data/ using psycopg, batching embeddings.
-from __future__ import annotations
-import os, asyncio, math
-from pathlib import Path
-from typing import List
-from src.ingestion.load_files import walk_data_dir
-from src.ingestion.normalize import normalize_rawdoc
-from src.ingestion.chunk import chunk_document, Chunk
-from src.ingestion.embed import aembed_chunks, Embedder, EmbeddingRecord
-from src.ingestion.pgvector_store import PGVectorStore, DEFAULT_DIM
+⸻
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
-MAX_TOKENS   = int(os.getenv("CHUNK_MAX_TOKENS", "350"))
-OVERLAP_TOKS = int(os.getenv("CHUNK_OVERLAP_TOKENS", "60"))
-EMBED_BATCH  = int(os.getenv("EMBED_BATCH", "256"))
-UPSERT_BATCH = int(os.getenv("UPSERT_BATCH", "500"))
+D) Security (this is existential for Jarvis)
 
-async def embed_and_upsert(
-    store: PGVectorStore,
-    embedder: Embedder,
-    chunks: List[Chunk]
-) -> int:
-    # Embed in manageable batches to respect rate limits
-    total = 0
-    for i in range(0, len(chunks), EMBED_BATCH):
-        sub = chunks[i:i+EMBED_BATCH]
-        recs: List[EmbeddingRecord] = await aembed_chunks(sub, embedder)
-        total += store.upsert_batch(recs, batch_size=UPSERT_BATCH)
-    return total
+10) Securing MCP (Dec 2025) — tool descriptor attacks: poisoning, shadowing, rug pulls
 
-async def main():
-    print(f"[build_index] Using DATA_DIR={DATA_DIR}")
-    store = PGVectorStore(embed_dim=DEFAULT_DIM)
-    store.ensure_schema()
+Why it matters: shows the attack surface isn’t only prompts—tool metadata can be weaponized. Proposes signing + semantic vetting + runtime guardrails.
+How you use it: treat MCP servers as untrusted: signed manifests, descriptor integrity, allow-lists, and anomaly blocking at runtime.  ￼
 
-    embedder = Embedder(model=os.getenv("EMBED_MODEL", "text-embedding-3-large"))
+11) AgentSentry (Feb 26, 2026) — inference-time defense against indirect prompt injection (multi-turn)
 
-    # Stream docs → normalize → chunk → buffer → embed+upsert
-    buffer: List[Chunk] = []
-    indexed = 0
-    doc_count = 0
+Why it matters: tackles multi-turn “silent takeover” via tool outputs / retrieved context, using temporal causal diagnostics + context purification.
+How you use it: add a “security gate” between tool-return → planner: detect takeover signals and purify context while preserving legitimate evidence.  ￼
 
-    for raw in walk_data_dir(DATA_DIR, include_pdf=False):
-        doc_count += 1
-        norm = normalize_rawdoc(raw)
-        pieces = list(chunk_document(norm, max_tokens=MAX_TOKENS, overlap_tokens=OVERLAP_TOKS))
-        buffer.extend(pieces)
+12) MemoryGraft (Dec 18, 2025) — persistent memory poisoning via “poisoned experience retrieval”
 
-        # Flush in ~2000-chunk groups for memory safety
-        if len(buffer) >= 2000:
-            print(f"[build_index] Embedding {len(buffer)} chunks …")
-            indexed += await embed_and_upsert(store, embedder, buffer)
-            buffer.clear()
-            print(f"[build_index] Total indexed so far: {indexed}")
+Why it matters: your long-term memory is a new trust boundary; attackers can implant “successful-looking” procedures that get reused later.
+How you use it: separate fact memory vs procedure memory, sign/attest trusted procedures, and run “memory quarantine” for new experiences until validated by tests + policy.  ￼
 
-    if buffer:
-        print(f"[build_index] Embedding final {len(buffer)} chunks …")
-        indexed += await embed_and_upsert(store, embedder, buffer)
-        buffer.clear()
+⸻
 
-    print(f"[build_index] DONE. Docs: {doc_count}, Chunks indexed: {indexed}")
+E) Practical ecosystem leverage: MCP packaging & tool onboarding
 
-if __name__ == "__main__":
-    asyncio.run(main())
+13) Claude Desktop Extensions (.mcpb) (Jun 26, 2025) — one-click tool server installation pattern
 
-```
+Why it matters: shows how fast tool ecosystems grow when integration is standardized and install is trivial.
+How you use it: adopt MCP compatibility early, but keep Jarvis’s runtime least-privilege + audit-first.  ￼
 
+⸻
 
+What to implement first (based on the above evidence)
+	1.	Verification-gated “Software Factory” loop + trajectory replay
 
+	•	BOAD-inspired modular hierarchy + logging now; replay cache next.  ￼
 
+	2.	Time-aware graph memory
 
+	•	Start with temporal KG primitives (validity windows + provenance) + query-local subgraphs for speed.  ￼
 
-# Selenium + All Links
+	3.	Security hardening before “tool ecosystem scale”
 
-```python
+	•	MCP descriptor signing/vetting + IPI defense + memory poisoning defenses.  ￼
 
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
-import time
+	4.	Latency as a KPI
 
-def inspect_page_classes(url):
-    """Inspect page-header and page-body classes from a URL"""
-    
-    print("="*80)
-    print(f"INSPECTING: {url}")
-    print("="*80 + "\n")
-    
-    with sync_playwright() as p:
-        # Launch browser
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        )
-        page = context.new_page()
-        
-        try:
-            # Load the page
-            print("Loading page...")
-            page.goto(url, wait_until='networkidle', timeout=60000)
-            
-            # Wait for JavaScript to render
-            time.sleep(3)
-            
-            # Scroll to trigger lazy loading
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(1)
-            
-            # Get HTML
-            html = page.content()
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # Extract page-header
-            print("\n" + "="*80)
-            print("PAGE-HEADER CLASS CONTENT:")
-            print("="*80)
-            
-            page_header = soup.find(class_='page-header')
-            if page_header:
-                # Get text content
-                header_text = page_header.get_text(separator='\n', strip=True)
-                print(header_text)
-                
-                # Count elements
-                links = page_header.find_all('a')
-                print(f"\n--- Statistics ---")
-                print(f"Links found: {len(links)}")
-                if links:
-                    print("Link URLs:")
-                    for link in links[:10]:  # Show first 10
-                        href = link.get('href', 'N/A')
-                        text = link.get_text(strip=True)
-                        print(f"  • {text}: {href}")
-                    if len(links) > 10:
-                        print(f"  ... and {len(links) - 10} more")
-            else:
-                print("⚠ page-header class NOT FOUND on this page")
-            
-            # Extract page-body
-            print("\n" + "="*80)
-            print("PAGE-BODY CLASS CONTENT:")
-            print("="*80)
-            
-            page_body = soup.find(class_='page-body')
-            if page_body:
-                # Get text content
-                body_text = page_body.get_text(separator='\n', strip=True)
-                print(body_text[:2000])  # Show first 2000 chars
-                if len(body_text) > 2000:
-                    print(f"\n... (showing first 2000 of {len(body_text)} characters)")
-                
-                # Count elements
-                links = page_body.find_all('a')
-                h1s = page_body.find_all('h1')
-                h2s = page_body.find_all('h2')
-                h3s = page_body.find_all('h3')
-                
-                print(f"\n--- Statistics ---")
-                print(f"Total characters: {len(body_text)}")
-                print(f"Links found: {len(links)}")
-                print(f"H1 tags: {len(h1s)}")
-                print(f"H2 tags: {len(h2s)}")
-                print(f"H3 tags: {len(h3s)}")
-                
-                # Show headings
-                if h1s:
-                    print("\nH1 headings:")
-                    for h1 in h1s[:5]:
-                        print(f"  • {h1.get_text(strip=True)}")
-                
-                if h2s:
-                    print("\nH2 headings:")
-                    for h2 in h2s[:5]:
-                        print(f"  • {h2.get_text(strip=True)}")
-                
-                if h3s:
-                    print("\nH3 headings:")
-                    for h3 in h3s[:5]:
-                        print(f"  • {h3.get_text(strip=True)}")
-                
-                # Show first few links
-                if links:
-                    print("\nFirst 10 links in page-body:")
-                    for link in links[:10]:
-                        href = link.get('href', 'N/A')
-                        text = link.get_text(strip=True)[:50]
-                        print(f"  • {text}: {href}")
-                    if len(links) > 10:
-                        print(f"  ... and {len(links) - 10} more")
-            else:
-                print("⚠ page-body class NOT FOUND on this page")
-            
-            # Check for nested page-header inside page-body
-            print("\n" + "="*80)
-            print("CHECKING FOR NESTED ELEMENTS:")
-            print("="*80)
-            
-            if page_body:
-                nested_headers = page_body.find_all(class_='page-header')
-                if nested_headers:
-                    print(f"⚠ WARNING: Found {len(nested_headers)} page-header elements INSIDE page-body!")
-                    print("These will be excluded during crawling.")
-                else:
-                    print("✓ No page-header elements found inside page-body")
-            
-        except Exception as e:
-            print(f"Error: {e}")
-        
-        finally:
-            browser.close()
-    
-    print("\n" + "="*80)
-    print("INSPECTION COMPLETE")
-    print("="*80)
+	•	OSWorld-Human-style metrics from day 1 (steps, time, tool calls, reflection budget).  ￼
 
+⸻
 
-if __name__ == "__main__":
-    # Get URL from user
-    url = input("Enter URL to inspect: ").strip()
-    
-    if not url:
-        print("Error: URL required")
-    elif not url.startswith(('http://', 'https://')):
-        print("Error: URL must start with http:// or https://")
-    else:
-        inspect_page_classes(url)
-
-```
+If you want, I can turn this into a concrete “Jarvis research-to-roadmap spec”: a table of paper → feature → architecture decision → measurable KPI → MVP cut (so it’s investor-ready and engineering-ready).
