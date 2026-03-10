@@ -804,6 +804,7 @@ Below is a detailed end-to-end Mermaid flowchart for the architecture we settled
 
 I’ll first give the full flowchart, then explain it layer by layer.
 
+```mermaid
 flowchart TD
 
     %% =========================================================
@@ -1054,6 +1055,8 @@ flowchart TD
     H8 --> OUT
     OUT --> API
     API --> U
+
+```
 
 How to read this diagram
 
