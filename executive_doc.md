@@ -644,8 +644,8 @@ This layer converts business intent into structured analytical logic.
 
 Responsibilities:
 - classify the business question into a workflow family
-- select a saved workflow template or DAG
-- if needed later, compile a typed plan from a finite operator language
+- select a saved workflow template or DAG when one matches confidently
+- if no confident template exists, synthesize a new DAG from a **finite typed operator library**
 - resolve workflow slots such as:
   - metric
   - hierarchy
@@ -653,12 +653,18 @@ Responsibilities:
   - time grain
   - comparison mode
 - validate workflow compatibility against dataset semantics
-- produce an executable workflow graph
+- normalize the selected or synthesized workflow into an executable workflow graph
 
 Important design point:
-The workflow planner should prefer **parameterized template selection** over unrestricted planning whenever possible.
+The workflow planner should prefer **parameterized template selection** first, but it must also support **typed DAG synthesis fallback** for scale.
 
-For the stakeholder-oriented product, this layer is one of the most important differentiators.
+That means the system does not depend on a static workflow library forever. It can:
+1. reuse known high-confidence workflows when they exist,
+2. synthesize a new workflow from validated building blocks when no existing template fits,
+3. validate that synthesized DAG strictly before execution,
+4. and later promote successful synthesized DAGs into reusable templates.
+
+This makes the architecture both practical for stakeholder-approved workflows and scalable for unseen but still supported analytical questions.
 
 ---
 
@@ -967,6 +973,7 @@ This is the intended core product loop.
 ## 5. Detailed Flow Diagram
 
 ```mermaid
+
 flowchart TD
 
     U[User / Stakeholder] --> UI[Chat UI / Workflow UI / API]
@@ -1083,6 +1090,7 @@ flowchart TD
     INSIGHT --> PG
 
     RESP --> UI
+
 ```
 
 ### 5.1 How to read the diagram
@@ -1253,7 +1261,7 @@ Output:
 - confidence score
 
 #### Step 7: Workflow template selection
-The system looks up the best matching workflow template from the workflow registry.
+The system first looks up the best matching workflow template from the workflow registry.
 
 Selection is based on:
 - user query
@@ -1263,15 +1271,45 @@ Selection is based on:
 - compatibility rules
 - later, saved user/org workflows
 
-If no template confidently matches, the system should either:
-- ask for clarification
-- or later use a fallback typed plan compiler
+If a template confidently matches, that template becomes the planning scaffold.
+
+If no template confidently matches, the system must **not** jump to arbitrary workflow invention. Instead it should enter **DAG synthesis mode**.
 
 Output:
 - selected `WorkflowTemplate`
+- or a signal to synthesize a typed DAG
 
-#### Step 8: Slot resolution
-The selected workflow template contains typed slots such as:
+#### Step 8: Typed DAG synthesis fallback
+If no existing workflow is a good fit, the planner should synthesize a DAG using only a finite set of validated operator types.
+
+Examples of allowed operators include:
+- resolve columns
+- resolve hierarchy
+- retrieve chunks
+- materialize subtable
+- create pivot
+- apply formula
+- compare views
+- rank within group
+- drill-down / roll-up
+- select output
+- validate output
+
+Important rule:
+The LLM is not allowed to invent arbitrary node types or arbitrary code.
+It may only compose workflows from the approved operator library.
+
+Output:
+- candidate synthesized DAG
+
+#### Step 9: Slot resolution and DAG normalization
+Whether the workflow came from:
+- an existing template,
+- or synthesized planning,
+
+the next step is to bind the typed slots and normalize the workflow into a canonical DAG form.
+
+Typical slots include:
 - metric
 - parent hierarchy
 - child hierarchy
@@ -1288,29 +1326,33 @@ The orchestrator fills these slots from:
 - user query
 
 Output:
-- bound workflow instance
+- bound and normalized workflow instance
 - `WorkflowRun` or executable workflow graph
 
-#### Step 9: Workflow validation
+#### Step 10: Workflow validation
 Before execution, the workflow is validated.
 
 Validation checks:
+- graph is acyclic
 - required slots are filled
 - referenced fields exist
 - hierarchy paths are valid
 - measure types are compatible
 - formulas are supported
+- operator sequence is type-safe
 - dataset is compatible with this workflow family
+- all nodes belong to the approved operator registry
 
 If validation fails:
 - ask clarification
-- or abstain
+- abstain
+- or fall back to a simpler supported path
 
 Output:
 - validated workflow run
-- or clarification path
+- or clarification / abstention path
 
-#### Step 10: Deterministic execution
+#### Step 11: Deterministic execution
 The deterministic execution layer now runs the workflow.
 
 Execution may include:
@@ -1332,7 +1374,7 @@ Output:
 - lineage trace
 - execution metadata
 
-#### Step 11: Result validation
+#### Step 12: Result validation
 Once the final analytical result is produced, the system validates:
 - schema correctness
 - row/column consistency
@@ -1350,7 +1392,7 @@ Output:
 - trusted `ViewState`
 - or failure/abstention
 
-#### Step 12: Explanation and answer shaping
+#### Step 13: Explanation and answer shaping
 The system then prepares the user-facing response.
 
 Possible outputs:
@@ -1363,7 +1405,7 @@ Possible outputs:
 
 The default truth object should remain the analytical table.
 
-#### Step 13: Optional charting
+#### Step 14: Optional charting
 If visualization is requested:
 - chart planner reads `ViewState`
 - selects chart type
@@ -1375,7 +1417,7 @@ If visualization is requested:
 Important:
 Charting must only consume the trusted analytical view, not raw source data.
 
-#### Step 14: Persist and update state
+#### Step 15: Persist and update state
 Finally, the system updates:
 - active `AnalysisWorkflowState`
 - active `ViewState`
@@ -1392,7 +1434,7 @@ This makes follow-up workflows and edits possible.
 
 The operational pipeline can be summarized as:
 
-> **raw business data → semantic understanding → evidence localization → workflow template selection → parameter binding → deterministic pivot-and-formula execution → validated analytical table → optional charting → persisted workflow state**
+> **raw business data → semantic understanding → evidence localization → workflow template selection or typed DAG synthesis → parameter binding and validation → deterministic pivot-and-formula execution → validated analytical table → optional charting → persisted workflow state**
 
 ---
 
@@ -1626,6 +1668,43 @@ Proceed only if:
 - ambiguous question tests
 - top-3 candidate workflow ranking evaluation
 - unsupported query tests
+
+---
+### Phase 5B: Typed DAG synthesis fallback
+
+#### Goal
+Allow the system to handle supported but previously unseen analytical questions without depending only on pre-authored workflow templates.
+
+#### Build tasks
+- `OperatorRegistry` with approved operator types and contracts
+- `DAGSynthesisPlanner`
+- `DAGNormalizer`
+- `DAGValidator`
+- synthesized DAG confidence scoring
+- fallback logic from template selection to DAG synthesis
+- clarification / abstention logic for invalid synthesis
+
+#### Deliverables
+- candidate DAG synthesis from user query + semantic model + retrieval results
+- canonical normalized DAG representation
+- strict validation before execution
+- logging and governance for synthesized workflows
+
+#### Exit criteria
+Proceed only if:
+- synthesized DAGs use only approved operators
+- invalid workflows are rejected before execution
+- unseen but supported benchmark questions can be solved through synthesis
+- the system does not silently execute malformed or low-confidence DAGs
+
+#### Test plan
+- DAG acyclicity tests
+- operator-type whitelist tests
+- type-safety validation tests
+- unseen-query synthesis tests
+- malformed DAG rejection tests
+- clarification / abstention tests
+- promotion-candidate logging tests
 
 ---
 
@@ -1873,13 +1952,14 @@ The practical build order should be:
 4. Phase 3 — semantic chunking and retrieval
 5. Phase 4 — workflow template system
 6. Phase 5 — workflow selection and slot resolution
-7. Phase 6 — deterministic pivot and formula engine
-8. Phase 7 — workflow state and result views
-9. Phase 8 — explanation and abstention
-10. Phase 9 — charting
-11. Phase 10 — workflow customization
-12. Phase 11 — performance and async
-13. Phase 12 — packaging and interoperability
+7. Phase 5B — typed DAG synthesis fallback
+8. Phase 6 — deterministic pivot and formula engine
+9. Phase 7 — workflow state and result views
+10. Phase 8 — explanation and abstention
+11. Phase 9 — charting
+12. Phase 10 — workflow customization
+13. Phase 11 — performance and async
+14. Phase 12 — packaging and interoperability
 
 This order is recommended because it builds:
 - semantic understanding first
@@ -1927,6 +2007,7 @@ A strong version of the product should demonstrate the following:
 - it can ingest and semantically understand stakeholder datasets
 - it can retrieve the right evidence for business questions
 - it can select or instantiate the right workflow family
+- it can synthesize and validate typed fallback DAGs for supported but unseen questions
 - it can materialize pivots and formulas deterministically
 - it can produce reusable analytical tables
 - it can explain its process and abstain when uncertain
