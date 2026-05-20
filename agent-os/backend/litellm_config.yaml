@@ -1,0 +1,106 @@
+# LiteLLM Proxy Configuration
+# Run as standalone proxy: litellm --config litellm_config.yaml --port 8001
+# Or use the litellm Python SDK directly from the agents (no proxy needed).
+
+model_list:
+  # ─── Orchestrator (high reasoning) ──────────────────────────────────────
+  - model_name: orchestrator
+    litellm_params:
+      model: claude-opus-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      mode: chat
+      supports_function_calling: true
+
+  - model_name: orchestrator  # fallback
+    litellm_params:
+      model: deepseek/deepseek-r1
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: orchestrator  # fallback 2
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ─── Worker (code generation, local-first) ──────────────────────────────
+  - model_name: worker
+    litellm_params:
+      model: ollama/qwen2.5-coder:32b
+      api_base: http://ollama:11434
+
+  - model_name: worker  # fallback if Ollama is down
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: worker  # fallback 2
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ─── Validator (rule checking, local-first) ─────────────────────────────
+  - model_name: validator
+    litellm_params:
+      model: ollama/llama3.3:70b
+      api_base: http://ollama:11434
+
+  - model_name: validator  # fallback
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ─── Reporter (narrative quality) ───────────────────────────────────────
+  - model_name: reporter
+    litellm_params:
+      model: claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: reporter  # fallback
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ─── Memory (tiny, fast) ─────────────────────────────────────────────────
+  - model_name: memory
+    litellm_params:
+      model: ollama/llama3.3:8b
+      api_base: http://ollama:11434
+
+  - model_name: memory  # fallback
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  timeout: 60
+  fallback_models:
+    orchestrator: ["openai/gpt-4o"]
+    worker: ["openai/gpt-4o-mini"]
+    validator: ["openai/gpt-4o-mini"]
+    reporter: ["openai/gpt-4o"]
+    memory: ["openai/gpt-4o-mini"]
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  json_logs: true
+  cache: true
+  cache_params:
+    type: redis
+    host: redis
+    port: 6379
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+# Per-model spend limits (USD/month) — uncomment to enforce
+# litellm_budget_table:
+#   - model: claude-opus-4-5
+#     soft_budget: 50.0
+#     hard_budget: 200.0
+#   - model: openai/gpt-4o
+#     soft_budget: 30.0
+#     hard_budget: 100.0

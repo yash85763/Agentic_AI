@@ -1,0 +1,441 @@
+version: "3.9"
+
+# =============================================================================
+# AgentOS – Full Platform Stack
+# =============================================================================
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &always-restart
+  restart: unless-stopped
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Backend – FastAPI application
+  # ---------------------------------------------------------------------------
+  backend:
+    <<: *always-restart
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agentos-backend
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SERVICE_NAME=backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./agent-config:/app/agent-config
+      - uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Chainlit UI – Conversational agent interface
+  # ---------------------------------------------------------------------------
+  chainlit:
+    <<: *always-restart
+    build:
+      context: .
+      dockerfile: Dockerfile.chainlit
+    container_name: agentos-chainlit
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SERVICE_NAME=chainlit
+      - CHAINLIT_HOST=0.0.0.0
+      - CHAINLIT_PORT=8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./chainlit_app.py:/app/chainlit_app.py:ro
+      - ./agent-config:/app/agent-config:ro
+      - uploads:/app/uploads
+      - chainlit_public:/app/public
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Frontend – React application (served by nginx)
+  # ---------------------------------------------------------------------------
+  frontend:
+    <<: *always-restart
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
+        - VITE_CHAINLIT_URL=${VITE_CHAINLIT_URL:-http://localhost:8080}
+    container_name: agentos-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # LiteLLM Proxy – Unified LLM gateway with routing & budget control
+  # ---------------------------------------------------------------------------
+  litellm:
+    <<: *always-restart
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: agentos-litellm
+    env_file: .env
+    environment:
+      - LITELLM_CONFIG_FILE=/app/litellm_config.yaml
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend/litellm_config.yaml:/app/litellm_config.yaml:ro
+    command: >
+      --config /app/litellm_config.yaml
+      --port 4000
+      --num_workers 4
+      --detailed_debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Langfuse – LLM observability & tracing
+  # ---------------------------------------------------------------------------
+  langfuse-server:
+    <<: *always-restart
+    image: langfuse/langfuse:2
+    container_name: agentos-langfuse
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos_secret}@postgres:5432/${LANGFUSE_DB:-langfuse}
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-changeme-langfuse-secret-32chars}
+      - NEXTAUTH_URL=${LANGFUSE_URL:-http://localhost:3001}
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      - TELEMETRY_ENABLED=false
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Ollama – Local model inference
+  # ---------------------------------------------------------------------------
+  ollama:
+    <<: *always-restart
+    image: ollama/ollama:latest
+    container_name: agentos-ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    # GPU support: uncomment if NVIDIA GPU available
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    networks:
+      - agentos-net
+    logging: *default-logging
+    profiles:
+      - ollama  # Start with: docker compose --profile ollama up
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 – Primary database
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *always-restart
+    image: postgres:16-alpine
+    container_name: agentos-postgres
+    env_file: .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-agentos}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-agentos_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-agentos}
+      - POSTGRES_MULTIPLE_DATABASES=${LANGFUSE_DB:-langfuse}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentos} -d ${POSTGRES_DB:-agentos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 – Task queue, caching, pub/sub
+  # ---------------------------------------------------------------------------
+  redis:
+    <<: *always-restart
+    image: redis:7-alpine
+    container_name: agentos-redis
+    env_file: .env
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-redis_secret}
+      --maxmemory ${REDIS_MAX_MEMORY:-512mb}
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # MinIO – S3-compatible object storage for files and artifacts
+  # ---------------------------------------------------------------------------
+  minio:
+    <<: *always-restart
+    image: minio/minio:latest
+    container_name: agentos-minio
+    env_file: .env
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin_secret}
+      - MINIO_VOLUMES=/data
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # MinIO Init – Create default buckets on first start
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: agentos-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file: .env
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin_secret} &&
+        mc mb --ignore-existing local/${MINIO_UPLOADS_BUCKET:-uploads} &&
+        mc mb --ignore-existing local/${MINIO_ARTIFACTS_BUCKET:-artifacts} &&
+        mc mb --ignore-existing local/${MINIO_REPORTS_BUCKET:-reports} &&
+        mc anonymous set download local/${MINIO_REPORTS_BUCKET:-reports} &&
+        echo 'MinIO buckets initialized.'
+      "
+    networks:
+      - agentos-net
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker – Async task processing for agent pipelines
+  # ---------------------------------------------------------------------------
+  celery-worker:
+    <<: *always-restart
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agentos-celery-worker
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SERVICE_NAME=celery-worker
+      - C_FORCE_ROOT=false
+    command: >
+      celery -A tasks.celery_app worker
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+      --concurrency=${CELERY_CONCURRENCY:-4}
+      --max-tasks-per-child=100
+      --queues=default,pipelines,sandbox
+      -E
+    volumes:
+      - ./backend:/app
+      - ./agent-config:/app/agent-config
+      - uploads:/app/uploads
+      - /var/run/docker.sock:/var/run/docker.sock  # For sandbox container launch
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 5"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat – Scheduled task runner (monthly reports, etc.)
+  # ---------------------------------------------------------------------------
+  celery-beat:
+    <<: *always-restart
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agentos-celery-beat
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SERVICE_NAME=celery-beat
+    command: >
+      celery -A tasks.celery_app beat
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agentos-net
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Flower – Celery monitoring UI
+  # ---------------------------------------------------------------------------
+  flower:
+    <<: *always-restart
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agentos-flower
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      celery -A tasks.celery_app flower
+      --port=5555
+      --broker=redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379/0
+      --basic_auth=${FLOWER_BASIC_AUTH:-admin:flower_secret}
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - agentos-net
+    profiles:
+      - monitoring
+    logging: *default-logging
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  ollama_models:
+    driver: local
+  uploads:
+    driver: local
+  chainlit_public:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  agentos-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
