@@ -1,241 +1,412 @@
-Yes. This is the better foundation.
+Yes — then don’t call it a “coding agent” in the general sense.
 
-The mistake in AgentOS was trying to first design many agents. The better move is to design an Agent Manufacturing Standard.
+Call it:
 
-Core idea:
+Data Analysis Agent
 
-An agent should not “contain” tools, skills, knowledge, and memory.
-An agent should expose ports where those things can be plugged in.
+Its job is not to build software.
 
-This aligns with current direction: MCP standardizes tool/data connection like a “USB-C” layer for agents, and recent agent engineering guidance favors simple composable agents over too many specialized agents.
+Its job is:
 
-The Agent Core
+Given a PDF, Excel, CSV, or structured file, understand it, write safe analysis code when needed, run that code in a sandbox, and answer the user’s question with evidence.
 
-For a coding agent, the core should be very small:
-
-Agent Core =
-  reasoning loop
-  planning policy
-  tool-use policy
-  context assembler
-  execution monitor
-  reflection/evaluation loop
-
-Everything else should be external.
-
-                 ┌────────────────────┐
-                 │    Coding Agent     │
-                 │      Core           │
-                 └─────────┬──────────┘
-                           │
-     ┌────────────┬─────────┼─────────┬────────────┐
-     │            │         │         │            │
-  Tool Port   Skill Port Knowledge  Memory Port  Policy Port
-     │            │       Port          │            │
- Git, shell,   refactor, docs, APIs,  repo memory, security,
- tests, IDE,   debug,     styleguide, user prefs, permissions,
- browser       review     patterns     task history approvals
-
-The Standard Ports
-
-1. Tool Port
-
-Tools are actions.
-
-Examples for coding agent:
-
-read_file
-write_file
-search_repo
-run_tests
-run_shell
-git_diff
-git_commit
-open_browser
-call_api
-run_linter
-run_typecheck
-
-MCP already moves in this direction by standardizing how agents connect to external tools and data sources.
-
-Tool interface:
-
-class ToolSpec:
-    name: str
-    description: str
-    input_schema: dict
-    output_schema: dict
-    permissions: list[str]
-    risk_level: str
+This is much simpler and more useful.
 
 ⸻
 
-2. Skill Port
+1. New Agent Definition
 
-Skills are procedures.
+Data Analysis Agent =
+  File Understanding Core
+  + Query Understanding
+  + Sandbox Code Executor
+  + PDF Reader
+  + Excel/Table Engine
+  + Validation Layer
+  + Answer Generator
 
-A skill is not a tool. A tool does one action. A skill tells the agent how to do a task well.
+The agent should only operate on uploaded input files.
 
-Example coding skills:
-
-bug_fixing.skill
-refactor_large_file.skill
-write_unit_tests.skill
-migrate_api.skill
-optimize_sql.skill
-review_pr.skill
-debug_failing_tests.skill
-
-A skill package can contain:
-
-skill.yaml
-instructions.md
-examples/
-checklists/
-scripts/
-evals/
-tool_policy.yaml
-
-This is very close to the direction Anthropic is moving with Claude Skills: reusable folders containing instructions, scripts, and resources for specific work contexts.
+No git.
+No repo editing.
+No app development.
+No shell freedom except inside controlled sandbox.
 
 ⸻
 
-3. Knowledge Port
+2. Agent Architecture
 
-Knowledge is reference context.
-
-For coding agent:
-
-repo architecture
-coding standards
-API docs
-database schema
-deployment guide
-security rules
-team conventions
-known bugs
-design decisions
-
-Knowledge should be retrievable, versioned, and scoped.
-
-class KnowledgeSource:
-    id: str
-    scope: Literal["repo", "project", "org", "public"]
-    trust_level: Literal["verified", "internal", "untrusted"]
-    retriever: Retriever
-
-⸻
-
-4. Memory Port
-
-Memory is learned state.
-
-But memory should not be random chat history.
-
-For coding agent, useful memory types are:
-
-repo_memory: how this repo is structured
-user_memory: how Yash prefers explanations / code style
-task_memory: current task state
-failure_memory: previous failed attempts
-workflow_memory: successful past patterns
-
-Recent memory research supports structured memory rather than dumping raw conversations into context. One recent persistent memory layer paper argues that memory should be treated as a data-structuring problem, using compact representations instead of huge raw context.
+                  User Query
+                      |
+                      v
+              Query Understanding
+                      |
+          ┌───────────┴────────────┐
+          |                        |
+       PDF File                Excel/File
+          |                        |
+          v                        v
+  PDF Extraction Engine     Table Profiling Engine
+          |                        |
+          v                        v
+  Document Understanding    Data Understanding
+          |                        |
+          └───────────┬────────────┘
+                      v
+              Analysis Planner
+                      |
+                      v
+              Sandbox Code Runner
+                      |
+                      v
+              Result Validator
+                      |
+                      v
+              Final Answer
 
 ⸻
 
-5. Policy Port
+3. The Agent Core Should Be Small
 
-This is extremely important.
-
-Policy decides what the agent is allowed to do.
-
-Can it edit files?
-Can it run shell commands?
-Can it install packages?
-Can it access internet?
-Can it commit code?
-Can it call production APIs?
-Does it need approval?
-
-OpenAI’s agent guidance emphasizes guardrails, approvals, and evals for reliable agent behavior.
+class DataAnalysisAgent:
+    def __init__(
+        self,
+        file_reader,
+        query_planner,
+        sandbox,
+        validator,
+        answer_generator,
+        memory=None,
+        knowledge=None,
+    ):
+        self.file_reader = file_reader
+        self.query_planner = query_planner
+        self.sandbox = sandbox
+        self.validator = validator
+        self.answer_generator = answer_generator
+        self.memory = memory
+        self.knowledge = knowledge
+    def run(self, user_query: str, uploaded_file: str):
+        file_profile = self.file_reader.profile(uploaded_file)
+        plan = self.query_planner.create_plan(
+            query=user_query,
+            file_profile=file_profile
+        )
+        result = self.sandbox.execute(plan)
+        validated_result = self.validator.validate(
+            result=result,
+            file_profile=file_profile,
+            plan=plan
+        )
+        return self.answer_generator.generate(
+            query=user_query,
+            result=validated_result,
+            file_profile=file_profile
+        )
 
 ⸻
 
-The Better Definition of an Agent
+4. Required Plug-in Ports
 
-An agent should be manufactured like this:
+A. File Reader Port
 
-coding_agent = AgentFactory.create(
-    core=ReasoningCore(model="claude/gpt/deepseek"),
-    tools=[git_tools, shell_tools, file_tools, test_tools],
-    skills=[debug_skill, refactor_skill, unit_test_skill],
-    knowledge=[repo_docs, architecture_docs, api_docs],
-    memory=[repo_memory, task_memory, user_memory],
-    policy=developer_safety_policy,
+Handles file type detection.
+
+class FileReaderPort:
+    def profile(self, file_path: str) -> dict:
+        ...
+
+Implementations:
+
+PDFReader
+ExcelReader
+CSVReader
+ParquetReader
+JSONReader
+
+⸻
+
+B. PDF Reader
+
+PDF needs two separate jobs:
+
+PDF Reading = extracting raw text/tables/images
+PDF Understanding = interpreting structure and meaning
+
+PDF module:
+
+PDFReader
+  - detect text-based vs scanned
+  - extract text
+  - extract tables
+  - preserve page numbers
+  - preserve headings
+  - chunk content
+  - create searchable document index
+
+For PDFs, the agent should answer with page-level evidence.
+
+Example:
+
+According to page 4, the contract caps travel reimbursement at $5,000 per quarter.
+
+⸻
+
+C. Excel/Table Reader
+
+Excel module should inspect:
+
+sheets
+columns
+data types
+merged cells
+hidden rows/columns
+formulas
+named ranges
+empty rows
+tables
+pivots if available
+cell coordinates
+
+For Excel, the agent needs two modes:
+
+Cell Mode:
+  “What is in cell B14?”
+Table Mode:
+  “Pivot this by region and month”
+
+⸻
+
+5. Excel Capabilities
+
+The Excel agent should support:
+
+read specific cell
+read row/column range
+extract subtable
+filter rows
+sort data
+groupby aggregation
+pivot table
+join sheets
+detect headers
+clean missing values
+date parsing
+formula inspection
+statistical summary
+correlation
+regression
+z-score
+IQR outlier detection
+forecasting, later
+
+⸻
+
+6. Sandbox Code Runner
+
+The sandbox is the most important part.
+
+The LLM should not calculate directly.
+
+It should produce a structured execution plan.
+
+Example:
+
+{
+  "operation": "pivot_table",
+  "file_type": "excel",
+  "sheet": "Sales",
+  "index": ["Region"],
+  "columns": ["Month"],
+  "values": ["Revenue"],
+  "aggfunc": "sum"
+}
+
+Then your backend converts this into deterministic Python code:
+
+import pandas as pd
+df = pd.read_excel(file_path, sheet_name="Sales")
+result = pd.pivot_table(
+    df,
+    index=["Region"],
+    columns=["Month"],
+    values=["Revenue"],
+    aggfunc="sum"
 )
+print(result.to_json())
 
-So agent creation becomes assembly, not custom coding.
+The best design is:
 
-The Key Insight
+LLM creates intent/plan.
+System creates safe code.
+Sandbox executes code.
+Validator checks result.
+LLM explains result.
 
-You are basically proposing:
+Not:
 
-Agents should be runtime shells, not monolithic programs.
+LLM writes arbitrary Python freely.
 
-Like a computer has:
+⸻
 
-USB ports
-drivers
-installed applications
-filesystem
-memory
-permissions
+7. Safer Execution Pattern
 
-An agent should have:
+Use this:
 
-tool ports
-skill packages
-knowledge mounts
-memory stores
-policy gates
+Natural Language Query
+        ↓
+Structured Analysis Plan
+        ↓
+Plan Validation
+        ↓
+Code Generation from Trusted Templates
+        ↓
+Sandbox Execution
+        ↓
+Result Validation
+        ↓
+Natural Language Answer
 
-That is the real “AgentOS” foundation.
+This gives you accuracy and safety.
 
-For Coding Agent Specifically
+⸻
 
-A coding agent should be manufactured from these modules:
+8. Agent Should Have These Tools Only
 
-Core:
-  planner + executor + verifier
-Tools:
-  file system, shell, git, tests, linter, browser, package manager
-Skills:
-  debugging, refactoring, code review, migration, test generation
-Knowledge:
-  repo map, architecture docs, coding standards, API docs
+read_pdf_text
+read_pdf_tables
+search_pdf_chunks
+read_excel_metadata
+read_excel_cell
+read_excel_range
+profile_table
+run_pandas_operation
+run_statistical_analysis
+generate_chart_data
+execute_in_sandbox
+validate_result
+
+No general tools unless needed.
+
+⸻
+
+9. Skills Should Be Modular
+
+Skills are procedures, not tools.
+
+For this agent:
+
+PDF Question Answering Skill
+Excel Cell Lookup Skill
+Table Aggregation Skill
+Pivot Analysis Skill
+Statistical Analysis Skill
+Data Cleaning Skill
+Chart Preparation Skill
+Validation Skill
+
+Example skill:
+
+name: pivot_analysis
+description: Answer pivot-style analytical questions over tabular files.
+workflow:
+  - identify target sheet
+  - identify grouping columns
+  - identify value column
+  - identify aggregation function
+  - generate structured pivot plan
+  - run pivot in sandbox
+  - validate row counts and totals
+  - explain result
+
+⸻
+
+10. Memory Should Be Minimal at First
+
+Do not build complex human memory yet.
+
+For this agent, memory should only store:
+
+current uploaded file profile
+sheet summaries
+detected table schemas
+user’s previous questions in current session
+successful analysis plans
+known file quirks
+
+Example:
+
 Memory:
-  previous fixes, user preferences, repo conventions, failed attempts
-Policy:
-  approval gates, sandbox limits, write permissions, network rules
+  - Sheet "Sales 2024" uses row 3 as header.
+  - Column "Amt" means "Revenue".
+  - User prefers results as tables.
 
-Final Reframe
+That is enough.
 
-Do not start with:
+⸻
 
-Build Coding Agent
-Build Data Agent
-Build Memory Agent
-Build Research Agent
+11. Knowledge Should Be Optional
 
-Start with:
+Knowledge can include:
 
-Build Agent Manufacturing Runtime
+domain glossary
+company data dictionary
+metric definitions
+formula definitions
+accounting rules
+statistical method explanations
 
-Then agents become configurations:
+Example:
 
-Coding Agent = Core + Coding Skills + Dev Tools + Repo Knowledge + Coding Memory
-Data Agent = Core + Analytics Skills + SQL/Python Tools + Schema Knowledge + Dataset Memory
-Research Agent = Core + Search Skills + Browser Tools + Citation Knowledge + Research Memory
+"Net Revenue = Gross Revenue - Refunds - Discounts"
 
-This is much more innovative than just building another multi-agent framework.
+But the agent should still work without knowledge.
+
+⸻
+
+12. Final Simplified Agent
+
+InputDataAgent
+  Ports:
+    File Port
+    Analysis Plan Port
+    Sandbox Port
+    Validation Port
+    Memory Port
+    Knowledge Port
+  File Types:
+    PDF
+    Excel
+    CSV
+    JSON
+    Parquet
+  Main Jobs:
+    read
+    understand
+    extract
+    transform
+    compute
+    validate
+    answer
+
+⸻
+
+Better Name
+
+I would not call it Coding Agent.
+
+Better names:
+
+Data Analyst Agent
+Document + Data Agent
+Sandbox Analyst Agent
+Input Intelligence Agent
+File Analysis Agent
+
+My preferred name:
+
+Sandbox Analyst Agent
+
+Because the core innovation is:
+
+It can understand files, plan analysis, execute code safely in sandbox, and answer from computed evidence.
