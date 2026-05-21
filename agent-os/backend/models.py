@@ -78,6 +78,7 @@ class PipelineState(TypedDict, total=False):
     job_id: str
     task_description: str
     file_ids: list[str]
+    user_id: str                         # tenant identifier for RLS
     cognitive_context: dict[str, Any]   # loaded from CognitiveFSLoader
     system_prompt: str
     raw_data: dict[str, Any]            # loaded/parsed file contents
@@ -86,6 +87,12 @@ class PipelineState(TypedDict, total=False):
     report: str                         # final markdown/text report
     errors: list[str]
     status: str                         # mirrors JobStatus values
+    # Causal analysis gate (Section 4) — False by default; set True to enable
+    causal_mode_enabled: bool
+    # ConfidenceBundle dict attached to each output (Section 3)
+    confidence_bundles: dict[str, Any]
+    # Orchestrator routing decisions log (Section 6)
+    routing_decisions: list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------

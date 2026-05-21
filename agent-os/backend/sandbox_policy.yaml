@@ -1,0 +1,86 @@
+# Sandbox execution policy for AgentOS
+# Controls which Python modules and builtins are permitted inside the sandbox.
+# Modify this file to extend or restrict sandbox capabilities without code changes.
+
+approved_modules:
+  # Data processing
+  - pandas
+  - numpy
+  - scipy
+  - statsmodels
+  - sklearn
+  # File formats
+  - openpyxl
+  - xlrd
+  - xlwt
+  - pyarrow
+  - duckdb
+  # Date / time / locale
+  - dateutil
+  - holidays
+  - pytz
+  # Standard library (safe subset)
+  - json
+  - csv
+  - os
+  - pathlib
+  - math
+  - statistics
+  - decimal
+  - datetime
+  - collections
+  - itertools
+  - functools
+  - operator
+  - typing
+  - io
+  - re
+  - string
+  - sys
+  - copy
+  - pprint
+  - textwrap
+  - enum
+  - abc
+  - dataclasses
+  - warnings
+  - traceback
+  - struct
+  - hashlib
+  - base64
+  - uuid
+  - random
+
+# Built-in functions that must never be called in sandbox code
+blocked_builtins:
+  - exec
+  - eval
+  - compile
+  - __import__
+  - breakpoint
+
+# Attribute access patterns that indicate network or privilege escalation
+blocked_attributes:
+  - socket
+  - AF_INET
+  - SOCK_STREAM
+  - connect
+  - bind
+  - listen
+  - sendall
+  - recvfrom
+
+# Hard limits
+max_code_lines: 500
+max_execution_seconds: 30
+
+# Sandbox directory layout (must match SandboxExecutor and sandbox Dockerfile)
+output_dir: /sandbox/outputs
+input_dir: /sandbox/inputs
+
+# Contract check tolerances
+contract_check:
+  sum_tolerance_absolute: 0.01   # USD
+  outlier_std_threshold: 3.0     # standard deviations
+  row_ratio_min: 0.01
+  row_ratio_max: 100.0

@@ -79,6 +79,12 @@ class OrchestratorAgent(BaseAgent):
     - Invokes sub-agents by calling their ``run()`` methods (or via A2A if
       they are remote).
     - Validates the final merged output before handing it to the report stage.
+    - Logs every parallel fan-out decision as a ROUTING_DECISION SSE event.
+    - Escalates to the user (ESCALATION_REQUIRED event) when routing is ambiguous.
+
+    Tool count note (Section 6.1): The orchestrator is the exception to the
+    max-4-tools rule. Its tools are management tools (plan, delegate, validate,
+    escalate) — not execution tools. Specialist agents enforce MAX_TOOLS = 4.
     """
 
     DEFAULT_MODEL = ORCHESTRATOR_MODEL
@@ -92,6 +98,12 @@ class OrchestratorAgent(BaseAgent):
         "VisualizationAgent",
         "ReportAgent",
         "MemoryAgent",
+    ]
+
+    # Specialist agents whose file-level work can be parallelised
+    PARALLELISABLE_AGENTS: List[str] = [
+        "IngestionAgent",
+        "TransformationAgent",
     ]
 
     def __init__(
@@ -115,6 +127,84 @@ class OrchestratorAgent(BaseAgent):
         """Register a concrete agent instance so the orchestrator can delegate."""
         self._agent_registry[name] = agent
         logger.info("Orchestrator registered agent: %s", name)
+
+    # ------------------------------------------------------------------
+    # Routing decision log (Section 6.1)
+    # ------------------------------------------------------------------
+
+    def _log_parallel_fanout(
+        self,
+        file_count: int,
+        parallel_agents: List[str],
+        job_id: str,
+        redis_client: Any,
+    ) -> None:
+        """Emit a ROUTING_DECISION event explaining why fan-out is used.
+
+        Appears in the Langfuse trace as a dedicated span and is visible
+        in the frontend's agent feed.
+        """
+        # Rough estimate: assume 30s per file sequential vs 30s total parallel
+        est_seq = file_count * 30
+        est_par = 30
+        saving_pct = round((1 - est_par / max(est_seq, 1)) * 100, 1)
+
+        self._emit_event(
+            "routing_decision",
+            {
+                "file_count": file_count,
+                "parallel_agents": parallel_agents,
+                "estimated_sequential_seconds": est_seq,
+                "estimated_parallel_seconds": est_par,
+                "time_saving_pct": saving_pct,
+                "reasoning": (
+                    f"Parallel fan-out selected: {file_count} files → "
+                    f"{len(parallel_agents)} agents running concurrently. "
+                    f"Estimated {saving_pct}% faster than sequential processing."
+                ),
+            },
+            job_id,
+            redis_client,
+        )
+        logger.info(
+            "Routing decision: %d files → %d parallel agents (est. %d%% time saving)",
+            file_count,
+            len(parallel_agents),
+            saving_pct,
+        )
+
+    def _escalate(
+        self,
+        question: str,
+        context: str,
+        job_id: str,
+        redis_client: Any,
+        options: Optional[List[str]] = None,
+    ) -> None:
+        """Emit an ESCALATION_REQUIRED event when routing cannot be determined.
+
+        The frontend surfaces this as an interactive prompt (not a background
+        log). The pipeline pauses; the user's response should be fed back
+        via the job API.
+        """
+        self._emit_event(
+            "escalation_required",
+            {
+                "question": question,
+                "context": context,
+                "options": options or [],
+                "blocking": True,
+                "message": (
+                    "The orchestrator requires your input before proceeding. "
+                    "Please respond via the job interface."
+                ),
+            },
+            job_id,
+            redis_client,
+        )
+        logger.warning(
+            "Escalation required for job '%s': %s", job_id, question
+        )
 
     # ------------------------------------------------------------------
     # DAG planning
@@ -286,8 +376,24 @@ class OrchestratorAgent(BaseAgent):
         job_id = self._job_id()
 
         if agent_name not in self._agent_registry:
+            # Escalate to user rather than silently failing with a wrong routing
+            self._escalate(
+                question=(
+                    f"The pipeline plan calls for agent '{agent_name}' but it is "
+                    "not registered. Which registered agent should handle this step?"
+                ),
+                context=(
+                    f"Attempted agent: {agent_name}\n"
+                    f"Registered agents: {list(self._agent_registry.keys())}\n"
+                    f"Task params keys: {list(task_params.keys())}"
+                ),
+                job_id=job_id,
+                redis_client=redis_client,
+                options=list(self._agent_registry.keys()),
+            )
             raise KeyError(
-                f"Agent '{agent_name}' is not registered with the orchestrator. "
+                f"Agent '{agent_name}' is not registered. "
+                f"Escalation event emitted. "
                 f"Registered agents: {list(self._agent_registry.keys())}"
             )
 
@@ -416,6 +522,18 @@ class OrchestratorAgent(BaseAgent):
 
         # ---- Stage 2: Execute the DAG steps (skip IngestionAgent — done) ----
         completed_steps: Dict[str, bool] = {"step_1": True}  # IngestionAgent done
+
+        # Log parallel fan-out opportunity when multiple files are processed
+        file_count = len(file_manifests)
+        if file_count > 1:
+            parallel_agents = [
+                s.agent_name for s in plan.steps
+                if s.agent_name in self.PARALLELISABLE_AGENTS
+            ]
+            if parallel_agents:
+                self._log_parallel_fanout(
+                    file_count, parallel_agents, job_id, redis_client
+                )
 
         for step in plan.steps:
             # Skip IngestionAgent (already done above)

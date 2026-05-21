@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="AgentOS"
-LABEL description="Sandbox image for safe execution of agent-generated Python code"
+LABEL description="Hardened sandbox image for safe execution of agent-generated Python code"
 
 # System deps for numerical libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,13 +23,18 @@ RUN pip install --no-cache-dir \
     holidays==0.46 \
     pytz==2024.1
 
-# Non-root user for security
-RUN useradd -m -u 1001 -s /bin/bash sandbox \
-    && mkdir -p /data /out /home/sandbox \
-    && chown -R sandbox:sandbox /data /out /home/sandbox
+# Non-root sandbox user (uid 1001)
+RUN useradd -m -u 1001 -s /bin/bash sandbox
+
+# Create sandbox directory layout:
+#   /sandbox/inputs   — input files copied in by SandboxExecutor (read-only overlay)
+#   /sandbox/outputs  — code writes results here (tmpfs at runtime)
+# Both directories are owned by sandbox user.
+RUN mkdir -p /sandbox/inputs /sandbox/outputs \
+    && chown -R sandbox:sandbox /sandbox
 
 USER sandbox
-WORKDIR /home/sandbox
+WORKDIR /sandbox
 
-# Default command — gets overridden at runtime with the actual code to execute
+# Default command — overridden at runtime with actual code to execute
 CMD ["python", "-c", "print('sandbox ready')"]

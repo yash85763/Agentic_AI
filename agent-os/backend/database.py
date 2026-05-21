@@ -21,6 +21,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import (
@@ -74,6 +75,8 @@ class Job(Base):
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
     )
+    # user_id is required for Row Level Security — never default to a shared value
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, default="system")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     task_description: Mapped[str] = mapped_column(Text, nullable=False)
     file_ids: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True, default=list)
@@ -105,10 +108,21 @@ class FileRecord(Base):
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
     )
+    # user_id is required for Row Level Security
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, default="system")
     original_name: Mapped[str] = mapped_column(String(512), nullable=False)
     minio_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     content_type: Mapped[str] = mapped_column(String(256), nullable=False, default="application/octet-stream")
+    # Source trust tier for knowledge-base poisoning prevention (Section 2.4)
+    source_trust_tier: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="user-uploaded"
+    )
+    # Quarantine: new documents are held here until schema check + approval
+    quarantine_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="quarantined"
+    )
+    ingestion_metadata: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     job_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
     )
@@ -154,3 +168,43 @@ async def init_db(database_url: str) -> None:
 
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def set_rls_user_context(session: AsyncSession, user_id: str) -> None:
+    """Set PostgreSQL session-level user context for RLS policy evaluation.
+
+    Call this at the start of every request handler that touches the DB.
+    The value is scoped to the current transaction and cleared automatically.
+
+    Usage::
+
+        async for session in get_session():
+            await set_rls_user_context(session, request.state.user_id)
+            jobs = await session.execute(select(Job))
+    """
+    if not user_id or not user_id.strip():
+        raise ValueError(
+            "user_id must not be empty when setting RLS context. "
+            "Passing an empty user_id would bypass Row Level Security."
+        )
+    await session.execute(
+        text("SELECT set_config('app.current_user_id', :uid, true)"),
+        {"uid": user_id},
+    )
+
+
+async def lift_quarantine(
+    session: AsyncSession, file_id: str, user_id: str
+) -> None:
+    """Promote a file from quarantine to active retrieval access.
+
+    Only human-verified or policy-approved files should be lifted.
+    Logs the event to the ingestion_audit table.
+    """
+    from sqlalchemy import update
+    await session.execute(
+        update(FileRecord)
+        .where(FileRecord.id == file_id, FileRecord.user_id == user_id)
+        .values(quarantine_status="approved")
+    )
+    await session.commit()

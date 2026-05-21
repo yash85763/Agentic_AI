@@ -34,6 +34,15 @@ class EventType(str, Enum):
     AGENT_START = "agent_start"
     AGENT_COMPLETE = "agent_complete"
     PROGRESS = "progress"
+    # Orchestrator routing decisions (Section 6.1)
+    ROUTING_DECISION = "routing_decision"
+    # Escalation required — orchestrator cannot determine routing without user input
+    ESCALATION_REQUIRED = "escalation_required"
+    # Causal analysis events (Section 4)
+    CAUSAL_ASSUMPTIONS = "causal_assumptions_declared"
+    CAUSAL_SKIPPED = "causal_skipped"
+    CAUSAL_DOWNGRADED = "causal_downgraded"
+    CAUSAL_COMPLETE = "causal_computation_started"
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +333,45 @@ class AgentCompleteEvent(BaseModel):
     duration_ms: int
     success: bool = True
     skipped: bool = False
+
+
+class EscalationRequiredEvent(BaseModel):
+    """Emitted when the Orchestrator cannot determine routing without user input.
+
+    The frontend surfaces this as an interactive prompt, not a background log.
+    The pipeline pauses until the user responds.
+
+    Attributes
+    ----------
+    question:
+        The specific question the orchestrator needs answered.
+    context:
+        Relevant context to help the user answer (task summary, ambiguous inputs).
+    options:
+        If the ambiguity has known choices, list them here for the UI.
+    blocking:
+        True when the pipeline cannot continue without a response.
+    """
+
+    question: str
+    context: str
+    options: list[str] = Field(default_factory=list)
+    blocking: bool = True
+    ambiguous_input: Optional[str] = None
+
+
+class RoutingDecisionEvent(BaseModel):
+    """Emitted when the Orchestrator creates a parallel fan-out.
+
+    Logged to Langfuse as a dedicated span for auditing multi-agent decisions.
+    """
+
+    file_count: int
+    parallel_agents: list[str]
+    estimated_sequential_seconds: int
+    estimated_parallel_seconds: int
+    time_saving_pct: float
+    reasoning: str
 
 
 class ProgressEvent(BaseModel):

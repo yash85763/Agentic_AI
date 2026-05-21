@@ -1,0 +1,63 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_X32",
+    "SCMP_ARCH_AARCH64"
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "personality",
+        "keyctl",
+        "add_key",
+        "request_key",
+        "mbind",
+        "migrate_pages",
+        "move_pages",
+        "perf_event_open",
+        "unshare",
+        "setns",
+        "syslog",
+        "acct",
+        "reboot",
+        "swapon",
+        "swapoff",
+        "mount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "create_module",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "kexec_load",
+        "kexec_file_load",
+        "bpf",
+        "userfaultfd",
+        "io_uring_setup",
+        "io_uring_enter",
+        "io_uring_register"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "comment": "Block dangerous syscalls: kernel module loading, namespace manipulation, tracing, memory migration"
+    },
+    {
+      "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 2080505856,
+          "op": "SCMP_CMP_MASKED_EQ",
+          "comment": "Allow clone only for threads (CLONE_THREAD), not for new namespaces"
+        }
+      ]
+    }
+  ]
+}
