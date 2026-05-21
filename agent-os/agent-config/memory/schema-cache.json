@@ -1,0 +1,6 @@
+{
+  "_version": 1,
+  "_description": "Auto-updated by Memory Agent after each pipeline run. Maps file-shape fingerprints to discovered schemas. The Ingestion Agent consults this cache to avoid re-inferring schemas on familiar files.",
+  "_last_updated": null,
+  "schemas": {}
+}
