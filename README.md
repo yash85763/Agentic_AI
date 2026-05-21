@@ -1,144 +1,241 @@
-# Agentic_AI
-This repo has code and concepts for Agentic AI, but I will conduct this research on my own from open sources to produce a full indepth learning path along with working code and mathematical intuition behind some concepts, also will try to cite research papers as I will continue to nourish this repo. 
+Yes. This is the better foundation.
 
-Few things you might need to work and understand this repo:
-____
-____
-____
-____
-____
-____
-____
-____
-____
-____
+The mistake in AgentOS was trying to first design many agents. The better move is to design an Agent Manufacturing Standard.
 
+Core idea:
 
-# AI Agents Learning Path
+An agent should not “contain” tools, skills, knowledge, and memory.
+An agent should expose ports where those things can be plugged in.
 
-A comprehensive guide to understanding and building AI agents and Agentic AI systems.
+This aligns with current direction: MCP standardizes tool/data connection like a “USB-C” layer for agents, and recent agent engineering guidance favors simple composable agents over too many specialized agents.
 
-## Overview
+The Agent Core
 
-This learning path guides you through essential concepts, tools, and techniques for building AI agents. From foundational knowledge to advanced implementations, you'll learn how to create autonomous, intelligent systems capable of handling complex tasks with minimal human input.
+For a coding agent, the core should be very small:
 
-## What are AI Agents?
+Agent Core =
+  reasoning loop
+  planning policy
+  tool-use policy
+  context assembler
+  execution monitor
+  reflection/evaluation loop
 
-AI agents act based on goals set by the user without needing step-by-step instructions. Agentic AI takes this further by enabling agents to reflect, adapt, and improve over time, allowing them to collaborate with other agents and learn from their actions.
+Everything else should be external.
 
-## Learning Path Structure
+                 ┌────────────────────┐
+                 │    Coding Agent     │
+                 │      Core           │
+                 └─────────┬──────────┘
+                           │
+     ┌────────────┬─────────┼─────────┬────────────┐
+     │            │         │         │            │
+  Tool Port   Skill Port Knowledge  Memory Port  Policy Port
+     │            │       Port          │            │
+ Git, shell,   refactor, docs, APIs,  repo memory, security,
+ tests, IDE,   debug,     styleguide, user prefs, permissions,
+ browser       review     patterns     task history approvals
 
-### Step 1: Introduction to Generative AI
-- Core concepts of Generative AI
-- Understanding GANs, VAEs, and Gaussian Mixture Models
-- Advanced GenAI models (Diffusion Models, Transformer-based Models)
-- Real-world applications across industries
+The Standard Ports
 
-### Step 2: Basic Coding for AI
-- Python programming fundamentals
-- Data processing with Pandas
-- SQL basics for database management
-- API integration
-- Building simple AI-powered applications using Flask/FastAPI
+1. Tool Port
 
-### Step 3: LLM Essentials
-- Understanding Large Language Models
-- LLM architecture basics
-- Training and fine-tuning processes
-- Exploring real-world LLM examples (GPT-4, Claude 3.5 Sonnet, Gemini, etc.)
+Tools are actions.
 
-### Step 4: Prompt Engineering Essentials
-- Core principles of prompt engineering
-- Different prompting patterns:
-  - Zero-shot prompting
-  - One-shot prompting
-  - Few-shot prompting
-  - Role-based prompting
-- Advanced techniques like Chain of Thought and Self-Consistency
+Examples for coding agent:
 
-### Step 5: Introduction to LangChain
-- Core LangChain components
-- LangChain Expression Language (LCEL)
-- Creating prompt templates and parsers
-- Building conversational applications
-- Advanced AI system development
+read_file
+write_file
+search_repo
+run_tests
+run_shell
+git_diff
+git_commit
+open_browser
+call_api
+run_linter
+run_typecheck
 
-### Step 6: RAG Systems Essentials
-- Document loading and processing
-- Document chunking strategies
-- Vector databases (ChromaDB, Weaviate)
-- CRUD operations in vector databases
-- Retrieval strategies
-- End-to-end RAG system implementation
+MCP already moves in this direction by standardizing how agents connect to external tools and data sources.
 
-### Step 7: Introduction to AI Agents
-- Basic structure of AI agents
-- Types of agents:
-  - Simple Reflex Agents
-  - Model-Based Agents
-  - Goal-Based Agents
-  - Learning Agents
-- ReAct pattern implementation
+Tool interface:
 
-### Step 8: Agentic AI Design Patterns
-- Reflection patterns
-- Tool use implementation
-- Planning systems
-- Multi-agent collaboration frameworks
+class ToolSpec:
+    name: str
+    description: str
+    input_schema: dict
+    output_schema: dict
+    permissions: list[str]
+    risk_level: str
 
-### Step 9: Build Your First Agent – No Code
-- Using No-Code platforms
-- Agent customization and deployment
-- Building simple to advanced agents without coding
+⸻
 
-### Step 10: Build an AI Agent from Scratch in Python
-- LLM selection and integration
-- Tool and API implementation
-- ReAct pattern implementation
-- Testing and optimization
+2. Skill Port
 
-### Step 11: Build Agentic AI Systems with Advanced Frameworks
-- LangChain
-- CrewAI
-- LangGraph
-- AutoGen
-- Multi-agent system development
+Skills are procedures.
 
-### Step 12: Build Advanced Agentic RAG Systems
-- Self-RAG and corrective RAG techniques
-- External tool integration
-- Building self-reflective agents
-- System optimization
+A skill is not a tool. A tool does one action. A skill tells the agent how to do a task well.
 
-## Prerequisites
-- Basic knowledge of AI concepts is helpful but not required
-- The path starts with foundational topics, making it accessible to beginners
+Example coding skills:
 
-## Tools Covered
-- LangChain
-- LangGraph
-- AutoGen
-- CrewAI
-- Vector Databases (ChromaDB, Weaviate)
-- FastAPI/Flask
-- Python and related libraries
+bug_fixing.skill
+refactor_large_file.skill
+write_unit_tests.skill
+migrate_api.skill
+optimize_sql.skill
+review_pr.skill
+debug_failing_tests.skill
 
-## Time Commitment
-The learning path is flexible and self-paced. You can:
-- Follow the step-by-step guide
-- Skip to topics of interest
-- Adjust the pace according to your schedule
+A skill package can contain:
 
-## Who Is This For?
-- Beginners interested in AI development
-- Experienced developers looking to build complex AI systems
-- Data enthusiasts wanting to learn about AI agents
-- Professionals seeking to implement AI solutions
+skill.yaml
+instructions.md
+examples/
+checklists/
+scripts/
+evals/
+tool_policy.yaml
 
-## Additional Resources
-For a more structured learning experience, explore the Agentic AI Pioneer Program.
+This is very close to the direction Anthropic is moving with Claude Skills: reusable folders containing instructions, scripts, and resources for specific work contexts.
 
----
-Originally published by Analytics Vidhya  
-Author: Himanshi Singh  
-URL: https://www.analyticsvidhya.com/blog/2024/10/learning-path-for-ai-agents/
+⸻
+
+3. Knowledge Port
+
+Knowledge is reference context.
+
+For coding agent:
+
+repo architecture
+coding standards
+API docs
+database schema
+deployment guide
+security rules
+team conventions
+known bugs
+design decisions
+
+Knowledge should be retrievable, versioned, and scoped.
+
+class KnowledgeSource:
+    id: str
+    scope: Literal["repo", "project", "org", "public"]
+    trust_level: Literal["verified", "internal", "untrusted"]
+    retriever: Retriever
+
+⸻
+
+4. Memory Port
+
+Memory is learned state.
+
+But memory should not be random chat history.
+
+For coding agent, useful memory types are:
+
+repo_memory: how this repo is structured
+user_memory: how Yash prefers explanations / code style
+task_memory: current task state
+failure_memory: previous failed attempts
+workflow_memory: successful past patterns
+
+Recent memory research supports structured memory rather than dumping raw conversations into context. One recent persistent memory layer paper argues that memory should be treated as a data-structuring problem, using compact representations instead of huge raw context.
+
+⸻
+
+5. Policy Port
+
+This is extremely important.
+
+Policy decides what the agent is allowed to do.
+
+Can it edit files?
+Can it run shell commands?
+Can it install packages?
+Can it access internet?
+Can it commit code?
+Can it call production APIs?
+Does it need approval?
+
+OpenAI’s agent guidance emphasizes guardrails, approvals, and evals for reliable agent behavior.
+
+⸻
+
+The Better Definition of an Agent
+
+An agent should be manufactured like this:
+
+coding_agent = AgentFactory.create(
+    core=ReasoningCore(model="claude/gpt/deepseek"),
+    tools=[git_tools, shell_tools, file_tools, test_tools],
+    skills=[debug_skill, refactor_skill, unit_test_skill],
+    knowledge=[repo_docs, architecture_docs, api_docs],
+    memory=[repo_memory, task_memory, user_memory],
+    policy=developer_safety_policy,
+)
+
+So agent creation becomes assembly, not custom coding.
+
+The Key Insight
+
+You are basically proposing:
+
+Agents should be runtime shells, not monolithic programs.
+
+Like a computer has:
+
+USB ports
+drivers
+installed applications
+filesystem
+memory
+permissions
+
+An agent should have:
+
+tool ports
+skill packages
+knowledge mounts
+memory stores
+policy gates
+
+That is the real “AgentOS” foundation.
+
+For Coding Agent Specifically
+
+A coding agent should be manufactured from these modules:
+
+Core:
+  planner + executor + verifier
+Tools:
+  file system, shell, git, tests, linter, browser, package manager
+Skills:
+  debugging, refactoring, code review, migration, test generation
+Knowledge:
+  repo map, architecture docs, coding standards, API docs
+Memory:
+  previous fixes, user preferences, repo conventions, failed attempts
+Policy:
+  approval gates, sandbox limits, write permissions, network rules
+
+Final Reframe
+
+Do not start with:
+
+Build Coding Agent
+Build Data Agent
+Build Memory Agent
+Build Research Agent
+
+Start with:
+
+Build Agent Manufacturing Runtime
+
+Then agents become configurations:
+
+Coding Agent = Core + Coding Skills + Dev Tools + Repo Knowledge + Coding Memory
+Data Agent = Core + Analytics Skills + SQL/Python Tools + Schema Knowledge + Dataset Memory
+Research Agent = Core + Search Skills + Browser Tools + Citation Knowledge + Research Memory
+
+This is much more innovative than just building another multi-agent framework.
