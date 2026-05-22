@@ -1,412 +1,819 @@
-Yes — then don’t call it a “coding agent” in the general sense.
+AI Systems Engineering: From Agents to Cognitive Infrastructure
 
-Call it:
+Executive Summary
 
-Data Analysis Agent
+The slides collectively reveal a major paradigm shift happening in AI engineering.
 
-Its job is not to build software.
+The industry is moving away from:
 
-Its job is:
+* monolithic “super-agents”
+* prompt-centric engineering
+* chat-style orchestration
+* stochastic pipelines
+* vague evaluations
 
-Given a PDF, Excel, CSV, or structured file, understand it, write safe analysis code when needed, run that code in a sandbox, and answer the user’s question with evidence.
+And moving toward:
 
-This is much simpler and more useful.
+* specialized agent systems
+* compiler-inspired orchestration
+* deterministic execution
+* workflow-centric architectures
+* structured cognition
+* runtime engineering
+* evaluation-driven development
 
-⸻
-
-1. New Agent Definition
-
-Data Analysis Agent =
-  File Understanding Core
-  + Query Understanding
-  + Sandbox Code Executor
-  + PDF Reader
-  + Excel/Table Engine
-  + Validation Layer
-  + Answer Generator
-
-The agent should only operate on uploaded input files.
-
-No git.
-No repo editing.
-No app development.
-No shell freedom except inside controlled sandbox.
+This document consolidates the architectural, operational, and systems-level lessons from the presentations and connects them with broader AI systems engineering principles.
 
 ⸻
 
-2. Agent Architecture
+1. The Core Paradigm Shift
 
-                  User Query
-                      |
-                      v
-              Query Understanding
-                      |
-          ┌───────────┴────────────┐
-          |                        |
-       PDF File                Excel/File
-          |                        |
-          v                        v
-  PDF Extraction Engine     Table Profiling Engine
-          |                        |
-          v                        v
-  Document Understanding    Data Understanding
-          |                        |
-          └───────────┬────────────┘
-                      v
-              Analysis Planner
-                      |
-                      v
-              Sandbox Code Runner
-                      |
-                      v
-              Result Validator
-                      |
-                      v
-              Final Answer
+Old Paradigm
+
+Better model = better system
+
+This paradigm assumes:
+
+* intelligence is centralized
+* larger models solve orchestration
+* more context solves reasoning
+* generality is always better
+
+This led to:
+
+* giant ReAct agents
+* prompt spaghetti
+* fragile workflows
+* poor reproducibility
+* hallucination-heavy systems
 
 ⸻
 
-3. The Agent Core Should Be Small
+Emerging Paradigm
 
-class DataAnalysisAgent:
-    def __init__(
-        self,
-        file_reader,
-        query_planner,
-        sandbox,
-        validator,
-        answer_generator,
-        memory=None,
-        knowledge=None,
-    ):
-        self.file_reader = file_reader
-        self.query_planner = query_planner
-        self.sandbox = sandbox
-        self.validator = validator
-        self.answer_generator = answer_generator
-        self.memory = memory
-        self.knowledge = knowledge
-    def run(self, user_query: str, uploaded_file: str):
-        file_profile = self.file_reader.profile(uploaded_file)
-        plan = self.query_planner.create_plan(
-            query=user_query,
-            file_profile=file_profile
-        )
-        result = self.sandbox.execute(plan)
-        validated_result = self.validator.validate(
-            result=result,
-            file_profile=file_profile,
-            plan=plan
-        )
-        return self.answer_generator.generate(
-            query=user_query,
-            result=validated_result,
-            file_profile=file_profile
-        )
+Better orchestration
++ Better decomposition
++ Better validation
++ Better determinism
++ Better runtime design
+= Better AI system
+
+The system—not the model alone—is now the primary unit of engineering.
+
+This means:
+
+* workflows matter more than prompts
+* orchestration matters more than raw intelligence
+* reproducibility matters more than “creativity”
+* architecture matters more than demos
 
 ⸻
 
-4. Required Plug-in Ports
+2. Specialized Agents Over General Agents
 
-A. File Reader Port
+Key Insight
 
-Handles file type detection.
+Isolate your agents → specialization
 
-class FileReaderPort:
-    def profile(self, file_path: str) -> dict:
-        ...
-
-Implementations:
-
-PDFReader
-ExcelReader
-CSVReader
-ParquetReader
-JSONReader
+This is one of the deepest architectural insights.
 
 ⸻
 
-B. PDF Reader
+Why Monolithic Agents Fail
 
-PDF needs two separate jobs:
+A single giant agent that:
 
-PDF Reading = extracting raw text/tables/images
-PDF Understanding = interpreting structure and meaning
+* retrieves
+* reasons
+* codes
+* validates
+* executes
+* critiques
+* summarizes
 
-PDF module:
+eventually collapses under:
 
-PDFReader
-  - detect text-based vs scanned
-  - extract text
-  - extract tables
-  - preserve page numbers
-  - preserve headings
-  - chunk content
-  - create searchable document index
+* context pollution
+* conflicting objectives
+* unstable reasoning trajectories
+* retry complexity
+* hidden dependencies
 
-For PDFs, the agent should answer with page-level evidence.
+The result:
+
+* nondeterministic behavior
+* poor observability
+* difficult debugging
+* impossible evaluation
+
+⸻
+
+Specialized Agents
+
+Instead, systems should decompose cognition into:
+
+* smaller semantic units
+* narrow task boundaries
+* deterministic responsibilities
 
 Example:
 
-According to page 4, the contract caps travel reimbursement at $5,000 per quarter.
+Planner Agent
+    ↓
+Retriever Agent
+    ↓
+Transformation Agent
+    ↓
+Chart Generation Agent
+    ↓
+Validation Agent
+
+Each agent:
+
+* has smaller context
+* clearer goals
+* constrained outputs
+* measurable success criteria
 
 ⸻
 
-C. Excel/Table Reader
+Architectural Parallel
 
-Excel module should inspect:
+This mirrors:
 
-sheets
-columns
-data types
-merged cells
-hidden rows/columns
-formulas
-named ranges
-empty rows
-tables
-pivots if available
-cell coordinates
-
-For Excel, the agent needs two modes:
-
-Cell Mode:
-  “What is in cell B14?”
-Table Mode:
-  “Pivot this by region and month”
+* microservices
+* compiler passes
+* Unix philosophy
+* DAG runtimes
+* distributed systems
 
 ⸻
 
-5. Excel Capabilities
+3. AI Systems as Compilers
 
-The Excel agent should support:
+One of the most important insights from the slides:
 
-read specific cell
-read row/column range
-extract subtable
-filter rows
-sort data
-groupby aggregation
-pivot table
-join sheets
-detect headers
-clean missing values
-date parsing
-formula inspection
-statistical summary
-correlation
-regression
-z-score
-IQR outlier detection
-forecasting, later
+Agentic Coding ❤️ Compilers
+
+This is profound.
 
 ⸻
 
-6. Sandbox Code Runner
+Why Compiler Theory Matters
 
-The sandbox is the most important part.
+Compilers solve:
 
-The LLM should not calculate directly.
+* decomposition
+* scheduling
+* dependency analysis
+* optimization
+* caching
+* deterministic transformation
 
-It should produce a structured execution plan.
-
-Example:
-
-{
-  "operation": "pivot_table",
-  "file_type": "excel",
-  "sheet": "Sales",
-  "index": ["Region"],
-  "columns": ["Month"],
-  "values": ["Revenue"],
-  "aggfunc": "sum"
-}
-
-Then your backend converts this into deterministic Python code:
-
-import pandas as pd
-df = pd.read_excel(file_path, sheet_name="Sales")
-result = pd.pivot_table(
-    df,
-    index=["Region"],
-    columns=["Month"],
-    values=["Revenue"],
-    aggfunc="sum"
-)
-print(result.to_json())
-
-The best design is:
-
-LLM creates intent/plan.
-System creates safe code.
-Sandbox executes code.
-Validator checks result.
-LLM explains result.
-
-Not:
-
-LLM writes arbitrary Python freely.
+These are exactly the same problems faced by agent systems.
 
 ⸻
 
-7. Safer Execution Pattern
+Mapping Compiler Concepts to AI Systems
 
-Use this:
-
-Natural Language Query
-        ↓
-Structured Analysis Plan
-        ↓
-Plan Validation
-        ↓
-Code Generation from Trusted Templates
-        ↓
-Sandbox Execution
-        ↓
-Result Validation
-        ↓
-Natural Language Answer
-
-This gives you accuracy and safety.
+Compiler Concept	AI System Equivalent
+AST	Workflow graph
+Passes	Specialized agents
+Optimization	Planning/routing
+Dependency graph	Agent DAG
+Intermediate representation	Structured artifacts
+Incremental recompilation	Partial recomputation
+Static analysis	Validation/evals
+Runtime	Agent orchestration engine
 
 ⸻
 
-8. Agent Should Have These Tools Only
+Future AI Systems
 
-read_pdf_text
-read_pdf_tables
-search_pdf_chunks
-read_excel_metadata
-read_excel_cell
-read_excel_range
-profile_table
-run_pandas_operation
-run_statistical_analysis
-generate_chart_data
-execute_in_sandbox
-validate_result
+Future systems will increasingly resemble:
 
-No general tools unless needed.
+* operating systems
+* compilers
+* workflow engines
+* distributed runtimes
+* cognitive infrastructure
+
+NOT:
+
+* chatbots with tools
 
 ⸻
 
-9. Skills Should Be Modular
+4. Determinism as a First-Class Principle
 
-Skills are procedures, not tools.
+Critical Insight
 
-For this agent:
+Determinism → correctness
 
-PDF Question Answering Skill
-Excel Cell Lookup Skill
-Table Aggregation Skill
-Pivot Analysis Skill
-Statistical Analysis Skill
-Data Cleaning Skill
-Chart Preparation Skill
-Validation Skill
-
-Example skill:
-
-name: pivot_analysis
-description: Answer pivot-style analytical questions over tabular files.
-workflow:
-  - identify target sheet
-  - identify grouping columns
-  - identify value column
-  - identify aggregation function
-  - generate structured pivot plan
-  - run pivot in sandbox
-  - validate row counts and totals
-  - explain result
+This is one of the most mature engineering ideas in the slides.
 
 ⸻
 
-10. Memory Should Be Minimal at First
+Why Determinism Matters
 
-Do not build complex human memory yet.
+Without determinism:
 
-For this agent, memory should only store:
-
-current uploaded file profile
-sheet summaries
-detected table schemas
-user’s previous questions in current session
-successful analysis plans
-known file quirks
-
-Example:
-
-Memory:
-  - Sheet "Sales 2024" uses row 3 as header.
-  - Column "Amt" means "Revenue".
-  - User prefers results as tables.
-
-That is enough.
+* debugging becomes impossible
+* evaluations become noisy
+* regressions become invisible
+* caching breaks
+* orchestration becomes unstable
 
 ⸻
 
-11. Knowledge Should Be Optional
+Entropy Reduction
 
-Knowledge can include:
+Modern AI systems increasingly require:
 
-domain glossary
-company data dictionary
-metric definitions
-formula definitions
-accounting rules
-statistical method explanations
+* structured outputs
+* typed schemas
+* constrained generation
+* DAG execution
+* reproducible workflows
 
-Example:
+All of these:
 
-"Net Revenue = Gross Revenue - Refunds - Discounts"
-
-But the agent should still work without knowledge.
+* reduce entropy
+* increase reliability
 
 ⸻
 
-12. Final Simplified Agent
+Example: Highcharts Problem
 
-InputDataAgent
-  Ports:
-    File Port
-    Analysis Plan Port
-    Sandbox Port
-    Validation Port
-    Memory Port
-    Knowledge Port
-  File Types:
-    PDF
-    Excel
-    CSV
-    JSON
-    Parquet
-  Main Jobs:
-    read
-    understand
-    extract
-    transform
-    compute
-    validate
-    answer
+This directly applies to deterministic chart generation systems.
+
+Bad architecture:
+
+LLM generates raw numerical arrays
+
+Problems:
+
+* decimal corruption
+* hallucinated values
+* unstable outputs
+
+Better architecture:
+
+LLM generates semantic config
+Data populated deterministically outside LLM
+
+This preserves:
+
+* numerical correctness
+* reproducibility
+* validation integrity
 
 ⸻
 
-Better Name
+5. Workflow-Centric AI
 
-I would not call it Coding Agent.
+Critical Insight
 
-Better names:
+Automate actual user workflows
 
-Data Analyst Agent
-Document + Data Agent
-Sandbox Analyst Agent
-Input Intelligence Agent
-File Analysis Agent
+Most AI demos optimize for:
 
-My preferred name:
+* intelligence
+* impressiveness
+* conversational quality
 
-Sandbox Analyst Agent
+Real enterprise systems optimize for:
 
-Because the core innovation is:
+* operational workflows
 
-It can understand files, plan analysis, execute code safely in sandbox, and answer from computed evidence.
+⸻
+
+Real Workflows Include
+
+* interruptions
+* retries
+* approvals
+* escalations
+* partial failures
+* dependencies
+* uncertainty
+* latency constraints
+
+⸻
+
+Example: Coinbase Support Architecture
+
+The slides show:
+
+* AI handles repetitive, deterministic tasks
+* Humans handle ambiguity and escalation
+
+This is extremely important.
+
+The goal is NOT:
+
+Replace humans
+
+The goal is:
+
+Optimize workflow routing
+
+⸻
+
+The Future
+
+AI systems become:
+
+* intelligent routers
+* workflow coordinators
+* decision support systems
+
+NOT:
+
+* universal autonomous intelligence
+
+⸻
+
+6. Runtime-Centric AI Engineering
+
+The presentations collectively show that AI engineering is becoming:
+
+runtime engineering
+
+⸻
+
+Old View
+
+The model is the product
+
+⸻
+
+New View
+
+The orchestration runtime is the product
+
+⸻
+
+Runtime Responsibilities
+
+Modern runtimes manage:
+
+* agent scheduling
+* retries
+* state management
+* caching
+* execution graphs
+* memory
+* evaluation
+* routing
+* observability
+* validation
+
+⸻
+
+Emerging AI Runtime Stack
+
+User Request
+    ↓
+Planner
+    ↓
+Workflow Graph
+    ↓
+Agent Scheduler
+    ↓
+Tool Execution Layer
+    ↓
+Validation Layer
+    ↓
+Memory Layer
+    ↓
+Observability + Evals
+
+⸻
+
+7. Evaluation Is a Systems Problem
+
+One of the strongest sections of the slides focused on evaluation.
+
+⸻
+
+Common Anti-Pattern
+
+Ask an LLM:
+“Rate this response 1–5”
+
+Then deploy.
+
+This is statistically weak and operationally dangerous.
+
+⸻
+
+Why Likert Scores Fail
+
+They are:
+
+* subjective
+* poorly calibrated
+* unstable
+* difficult to operationalize
+
+⸻
+
+Better Approach
+
+Treat evaluation like:
+
+supervised classification
+
+Instead of:
+
+helpfulness = 4/5
+
+Use:
+
+PASS / FAIL
+
+Examples:
+
+* citation_valid
+* scheduling_correct
+* retrieval_grounded
+* escalation_correct
+* human_handoff_needed
+
+⸻
+
+Why Binary Evaluations Win
+
+Binary evaluations:
+
+* improve agreement
+* simplify thresholds
+* enable automation
+* improve regression testing
+* make evaluations actionable
+
+⸻
+
+This Mirrors Software Testing
+
+Software engineering asks:
+
+Did the test pass?
+
+NOT:
+
+How correct was it from 1–5?
+
+⸻
+
+8. Data-Centric AI Engineering
+
+Critical Insight
+
+Looking at the data
+
+This section emphasized:
+
+* inspecting traces
+* clustering failures
+* analyzing workflows
+* understanding edge cases
+
+⸻
+
+Logs Alone Are Not Evals
+
+Many teams think:
+
+Store traces = observability
+
+Wrong.
+
+Without:
+
+* labels
+* taxonomy
+* clustering
+* metrics
+* analysis
+
+logs become noise.
+
+⸻
+
+Required Infrastructure
+
+Agent systems need:
+
+* trace analysis
+* failure categorization
+* workflow segmentation
+* behavioral taxonomy
+* drift detection
+* error clustering
+
+⸻
+
+AI Engineering Is Becoming Data-Centric
+
+Exactly like ML evolved from:
+
+model-centric
+
+to:
+
+data-centric
+
+Agent systems are undergoing the same transition.
+
+⸻
+
+9. Synthetic Data Generation
+
+Most Teams
+
+Generate 50 random prompts
+
+This creates:
+
+* generic data
+* low diversity
+* weak coverage
+
+⸻
+
+Better Approach
+
+Use:
+
+* structured dimensions
+* combinatorial variation
+* real traces
+* scenario mutation
+
+⸻
+
+Important Dimensions
+
+Examples:
+
+* persona
+* ambiguity
+* tone
+* intent
+* workflow stage
+* constraints
+* edge cases
+
+⸻
+
+Realistic Synthetic Data
+
+Best practice:
+
+1. start with real traces
+2. mutate dimensions
+3. inject controlled perturbations
+4. validate outputs
+5. filter low-quality examples
+
+⸻
+
+Related Concepts
+
+This resembles:
+
+* fuzz testing
+* mutation testing
+* combinatorial QA
+* experimental design
+
+⸻
+
+10. Structured Cognition
+
+Key Principle
+
+Enforce output structure & filter
+
+This validates:
+
+* typed outputs
+* schemas
+* Pydantic validation
+* artifact systems
+
+⸻
+
+Why Structured Outputs Matter
+
+Schemas:
+
+* constrain entropy
+* improve validation
+* simplify retries
+* improve orchestration
+* enable deterministic processing
+
+⸻
+
+Structured Cognition vs Unstructured Cognition
+
+Unstructured	Structured
+impressive demos	scalable systems
+freeform outputs	typed artifacts
+hard to validate	easy to validate
+fragile	reproducible
+stochastic	deterministic
+
+⸻
+
+11. Observability and Drift
+
+The slides also highlighted several critical failure modes.
+
+⸻
+
+Common Pitfalls
+
+Misusing similarity scores
+
+Similarity ≠ correctness.
+
+RAG systems often retrieve:
+
+* semantically similar
+* operationally wrong
+
+content.
+
+⸻
+
+Ignoring drift
+
+Systems drift over time:
+
+* behavioral drift
+* retrieval drift
+* tool drift
+* evaluation drift
+
+Production systems require:
+
+* continuous monitoring
+* benchmark tracking
+* failure analysis
+
+⸻
+
+Overfitting judges
+
+Judges themselves become biased if:
+
+* datasets are weak
+* labels are narrow
+* evaluation dimensions are incomplete
+
+⸻
+
+12. Emerging Design Principles
+
+The presentations collectively suggest the following future principles for AI systems engineering.
+
+⸻
+
+Principle 1 — Decompose Cognition
+
+Avoid giant agents.
+
+Use:
+
+* DAGs
+* workflows
+* semantic decomposition
+
+⸻
+
+Principle 2 — Prefer Determinism
+
+Constrain entropy:
+
+* schemas
+* typed outputs
+* reproducible execution
+
+⸻
+
+Principle 3 — Treat AI Like Infrastructure
+
+AI systems are:
+
+* runtimes
+* orchestrators
+* workflow systems
+
+NOT just:
+
+* chat interfaces
+
+⸻
+
+Principle 4 — Make Evaluation Actionable
+
+Prefer:
+
+* binary metrics
+* measurable criteria
+* operational guarantees
+
+⸻
+
+Principle 5 — Use Real Workflow Data
+
+Real traces are invaluable:
+
+* edge cases
+* failure patterns
+* behavioral distribution
+
+⸻
+
+Principle 6 — Build Validation Layers
+
+Validation should exist:
+
+* everywhere
+* continuously
+* automatically
+
+⸻
+
+Principle 7 — Optimize Routing, Not Just Intelligence
+
+The future is:
+
+* intelligent delegation
+* uncertainty-aware systems
+* escalation-aware systems
+
+⸻
+
+13. Implications for Future Systems
+
+These ideas directly support the development of:
+
+* Cognitive OS systems
+* Jarvis-style assistants
+* Graph orchestration runtimes
+* workflow DAG engines
+* structured memory systems
+* deterministic AI infrastructure
+
+⸻
+
+Future Architecture Pattern
+
+User Intent
+    ↓
+Planner
+    ↓
+Workflow Graph
+    ↓
+Specialized Agents
+    ↓
+Validation Layer
+    ↓
+Execution Runtime
+    ↓
+Memory + Observability
+    ↓
+Human Escalation (if needed)
+
+⸻
+
+Final Conclusion
+
+The deepest lesson from these slides is:
+
+intelligence alone does not scale
+
+What scales is:
+
+* decomposition
+* orchestration
+* determinism
+* specialization
+* evaluation
+* validation
+* workflow modeling
+* reproducibility
+* observability
+
+The future of AI is not:
+
+a bigger chatbot
+
+The future is:
+
+cognitive infrastructure.
