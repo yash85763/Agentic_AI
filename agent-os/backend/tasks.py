@@ -58,6 +58,10 @@ celery_app.conf.update(
             "task": "tasks.monthly_report_trigger",
             "schedule": crontab(day_of_month="1", hour="6", minute="0"),
         },
+        "weekly-training-export": {
+            "task": "tasks.export_training_data",
+            "schedule": crontab(day_of_week="sunday", hour="2", minute="0"),
+        },
     },
 )
 
@@ -179,7 +183,12 @@ def run_pipeline(
             os.path.join(os.path.dirname(__file__), "..", "agent-config"),
         )
         loader = CognitiveFSLoader(agent_config_root)
-        context = loader.load_context(task_description)
+        context = loader.load_context(task_description, session=session)
+        # Flatten demonstrations dict to a single text block for trajectory recording
+        if context.get("demonstrations"):
+            context["demonstrations_text"] = "\n\n---\n\n".join(
+                context["demonstrations"].values()
+            )
         system_prompt = loader.assemble_system_prompt(context)
 
         _publish_event(
@@ -229,7 +238,68 @@ def run_pipeline(
             }
 
         # ------------------------------------------------------------------
-        # 4. Persist result
+        # 4. Compute reward and record SDAR training data
+        # ------------------------------------------------------------------
+        try:
+            from sdar import (
+                UCBSkillSelector,
+                classify_task_type,
+                compute_reward,
+                extract_signals_from_pipeline_state,
+            )
+            from sdar.training_exporter import record_trajectory
+
+            skills_used = list(context.get("skills", {}).keys())
+            task_type = classify_task_type(task_description)
+
+            signals = extract_signals_from_pipeline_state(
+                job_id=job_id,
+                task_type=task_type,
+                skills_used=skills_used,
+                pipeline_result=pipeline_result,
+            )
+            reward_breakdown = compute_reward(signals)
+            reward_value = reward_breakdown.total
+
+            # Record per-skill reward for UCB learning
+            UCBSkillSelector().record_reward(
+                job_id=job_id,
+                skills_used=skills_used,
+                task_type=task_type,
+                reward=reward_value,
+                reward_breakdown=reward_breakdown.to_dict(),
+                session=session,
+            )
+
+            # Record full trajectory for GRPO training data collection
+            record_trajectory(
+                job_id=job_id,
+                task_description=task_description,
+                task_type=task_type,
+                skills_used=skills_used,
+                skills_context=context.get("demonstrations_text", ""),
+                agent_response=str(pipeline_result.get("report", "")),
+                reward=reward_value,
+                reward_breakdown=reward_breakdown.to_dict(),
+                validation_passed=signals.validation_passed,
+                retry_count=signals.retry_count,
+                user_accepted=None,
+                session=session,
+            )
+
+            _publish_event(
+                job_id, "thought", "orchestrator",
+                {
+                    "message": f"Reward computed: {reward_value:.3f}",
+                    "task_type": task_type,
+                    "reward_breakdown": reward_breakdown.to_dict()["components"],
+                },
+            )
+        except Exception as exc:
+            logger.warning("SDAR reward/trajectory recording failed (non-fatal): %s", exc)
+
+        # ------------------------------------------------------------------
+        # 5. Persist result
         # ------------------------------------------------------------------
         _update_job_status(session, job_id, "complete", result=pipeline_result)
         _publish_event(job_id, "result", "orchestrator", pipeline_result)
@@ -258,8 +328,46 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# Scheduled task
+# Scheduled tasks
 # ---------------------------------------------------------------------------
+
+
+@celery_app.task(name="tasks.export_training_data")
+def export_training_data() -> dict[str, Any]:
+    """Weekly task: export unexported SDAR training trajectories to JSONL.
+
+    Runs every Sunday at 02:00 UTC. Appends to the JSONL file at
+    SDAR_EXPORT_PATH (default: /tmp/sdar_trajectories.jsonl).
+    Also logs training readiness so operators know when to start fine-tuning.
+    """
+    session = None
+    try:
+        session = _get_sync_db_session()
+        from sdar.training_exporter import (
+            export_training_data as _export,
+            get_training_readiness_report,
+        )
+
+        count = _export(session)
+        report = get_training_readiness_report(session)
+
+        logger.info(
+            "export_training_data: exported=%d  ready=%s  total=%d  std_reward=%.3f",
+            count, report.is_ready, report.total_trajectories, report.std_reward,
+        )
+
+        if not report.is_ready:
+            logger.info("Training not ready: %s", report.readiness_reasons)
+
+        return {"exported": count, "readiness": report.to_dict()}
+
+    except Exception as exc:
+        logger.exception("export_training_data task failed: %s", exc)
+        raise
+    finally:
+        if session:
+            session.close()
+
 
 @celery_app.task(name="tasks.monthly_report_trigger")
 def monthly_report_trigger() -> dict[str, Any]:

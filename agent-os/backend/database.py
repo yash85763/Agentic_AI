@@ -16,8 +16,11 @@ from typing import Any, Optional
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
+    Float,
     ForeignKey,
+    Integer,
     String,
     Text,
     func,
@@ -134,6 +137,61 @@ class FileRecord(Base):
 
     def __repr__(self) -> str:
         return f"<FileRecord id={self.id} name={self.original_name}>"
+
+
+class SkillReward(Base):
+    """One reward observation per skill per pipeline run.
+
+    Written by UCBSkillSelector.record_reward() after every completed pipeline.
+    Read by UCBSkillSelector.select_skills() to compute UCB scores.
+    """
+    __tablename__ = "skill_rewards"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    job_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
+    skill_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    reward: Mapped[float] = mapped_column(Float, nullable=False)
+    reward_breakdown: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<SkillReward skill={self.skill_name} task={self.task_type} reward={self.reward:.3f}>"
+
+
+class TrainingTrajectory(Base):
+    """One SDAR training trajectory per completed pipeline run.
+
+    Written by sdar.record_trajectory() after every completed pipeline.
+    Exported to JSONL by sdar.export_training_data() for GRPO fine-tuning.
+    """
+    __tablename__ = "training_trajectories"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    job_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
+    task_description: Mapped[str] = mapped_column(Text, nullable=False)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    skills_used: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    skills_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    agent_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reward: Mapped[float] = mapped_column(Float, nullable=False)
+    reward_breakdown: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    validation_passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    user_accepted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    exported: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<TrainingTrajectory job={self.job_id} task_type={self.task_type} reward={self.reward:.3f}>"
 
 
 # ---------------------------------------------------------------------------

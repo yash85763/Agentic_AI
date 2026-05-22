@@ -105,6 +105,11 @@ class RetrievalResult:
     injection_risk_score: float = 0.0
     injection_patterns_found: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Asymmetric trust weight: 1.0 = full weight, 0.0 = should be warned/discarded
+    # Set by rerank_by_task_relevance() when task description is provided
+    trust_weight: float = 1.0
+    # Lexical relevance score of this chunk to the current task [0, 1]
+    task_relevance_score: float = 0.0
 
     @property
     def is_untrusted(self) -> bool:
@@ -327,6 +332,69 @@ class RetrievalMiddleware:
             injection_risk_score=risk_score,
             injection_patterns_found=patterns_found,
         )
+
+    # ------------------------------------------------------------------
+    # Asymmetric retrieval trust (SDAR Gap 6)
+    # ------------------------------------------------------------------
+
+    def score_lexical_relevance(self, task_description: str, content: str) -> float:
+        """Compute lexical Jaccard similarity between task and content.
+
+        Acts as a proxy for semantic relevance when a full embedding model is
+        unavailable. The full SDAR implementation uses vLLM two-pass scoring;
+        this is the inference-time approximation.
+
+        Returns a score in [0, 1].
+        """
+        def tokenize(text: str) -> set[str]:
+            return {w.lower() for w in re.findall(r"\w{3,}", text)}
+
+        task_tokens = tokenize(task_description)
+        content_tokens = tokenize(content)
+        if not task_tokens or not content_tokens:
+            return 0.0
+        intersection = task_tokens & content_tokens
+        union = task_tokens | content_tokens
+        return len(intersection) / len(union)
+
+    def rerank_by_task_relevance(
+        self,
+        results: list[RetrievalResult],
+        task_description: str,
+        low_relevance_threshold: float = 0.05,
+    ) -> list[RetrievalResult]:
+        """Score and reorder results by task relevance, adjusting trust weights.
+
+        High-relevance chunks (score >= threshold) get trust_weight=1.0.
+        Low-relevance chunks get trust_weight=0.5 and a warning added.
+
+        Results are sorted: first by trust_weight descending, then by
+        task_relevance_score descending within each tier.
+
+        Args:
+            results: Retrieved chunks from retrieve().
+            task_description: Current task for relevance scoring.
+            low_relevance_threshold: Jaccard score below which trust is reduced.
+
+        Returns:
+            Reordered list with trust_weight and task_relevance_score set.
+        """
+        for r in results:
+            r.task_relevance_score = self.score_lexical_relevance(task_description, r.content)
+
+            if r.task_relevance_score < low_relevance_threshold:
+                r.trust_weight = 0.5
+                if "low-relevance-to-task" not in r.injection_patterns_found:
+                    r.injection_patterns_found = list(r.injection_patterns_found) + ["low-relevance-to-task"]
+                logger.debug(
+                    "Low task relevance (%.3f) for source=%s — reducing trust weight",
+                    r.task_relevance_score, r.source_name,
+                )
+            else:
+                r.trust_weight = 1.0
+
+        results.sort(key=lambda r: (-r.trust_weight, -r.task_relevance_score))
+        return results
 
     def format_for_prompt(self, results: list[RetrievalResult]) -> str:
         """Format retrieval results for agent prompt inclusion.

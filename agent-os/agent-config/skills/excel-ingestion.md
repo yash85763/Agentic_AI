@@ -381,3 +381,191 @@ def validate_ingested_df(df: pd.DataFrame, sheet_name: str) -> dict:
 ---
 
 *Last updated: 2026-05-20*
+
+<!-- SDAR_DEMONSTRATIONS_START -->
+## Skill Demonstrations
+
+The following input/output examples are privileged training context (c+) for
+the SDAR teacher branch. They illustrate correct application of this skill.
+
+---
+
+### Demo 1: Multi-sheet workbook with merged header cells
+
+**Input:**
+```
+File: Q1_Engineering_Expenses.xlsx
+Sheets: ["Cover", "Jan-2026", "Feb-2026", "Mar-2026", "Totals"]
+Task: "Extract all expense rows from the three monthly sheets."
+Issue: Each monthly sheet has the department name merged across row 1 and actual headers on row 3.
+```
+
+**Correct Output:**
+```python
+import pandas as pd
+import openpyxl
+
+dfs = []
+for sheet in ["Jan-2026", "Feb-2026", "Mar-2026"]:
+    df = unmerge_and_fill("Q1_Engineering_Expenses.xlsx", sheet)
+    df = read_with_detected_header_from_df(df)
+    df = normalize_columns(df)
+    df = remove_total_rows(df, "description")
+    df["source_sheet"] = sheet
+    dfs.append(df)
+
+result = pd.concat(dfs, ignore_index=True)
+```
+
+**Why this is correct:**
+- `unmerge_and_fill` handles the merged department header before pandas reads it
+- `read_with_detected_header_from_df` correctly skips row 1 (department name) and row 2 (blank) to find headers on row 3
+- `remove_total_rows` strips subtotals that would cause double-counting
+- Adding `source_sheet` preserves provenance for the validation step
+
+---
+
+### Demo 2: Currency column with mixed formats
+
+**Input:**
+```
+DataFrame column 'amount' contains: ["$1,234.56", "(500.00)", "1200", "N/A", "$0.00"]
+Task: "Clean the amount column for summation."
+```
+
+**Correct Output:**
+```python
+df["amount_clean"] = df["amount"].map(parse_currency)
+# Result: [1234.56, -500.0, 1200.0, None, 0.0]
+
+# Drop rows with unparseable amounts
+df = df.dropna(subset=["amount_clean"])
+
+# Verify no unexpected negatives if this is an expense file
+negative_rows = df[df["amount_clean"] < 0]
+if len(negative_rows) > 0:
+    print(f"WARNING: {len(negative_rows)} negative expense rows — verify intent")
+```
+
+**Why this is correct:**
+- `parse_currency` handles `$`, commas, and accounting-format negatives `()`
+- `errors="coerce"` equivalent via `map(parse_currency)` — bad values become None, not crash
+- Negative amount warning is surfaced rather than silently accepted
+
+---
+
+### Demo 3: Detecting header row on row 4 (not row 1)
+
+**Input:**
+```
+File: Regional_Budget_Report.xlsx, Sheet "Summary"
+Rows 1-3 contain: ["ACME Corp", blank, "Prepared by: Finance Team"]
+Row 4 contains: ["Category", "Q1", "Q2", "Q3", "Q4", "Total"]
+Row 5 onwards: actual data
+Task: "Load the budget table."
+```
+
+**Correct Output:**
+```python
+df_raw = pd.read_excel(
+    "Regional_Budget_Report.xlsx",
+    sheet_name="Summary",
+    header=None,
+    engine="openpyxl",
+)
+header_row = detect_header_row(df_raw)  # returns 3 (0-indexed)
+df = pd.read_excel(
+    "Regional_Budget_Report.xlsx",
+    sheet_name="Summary",
+    header=header_row,
+    engine="openpyxl",
+)
+df = normalize_columns(df)
+```
+
+**Why this is correct:**
+- Reading with `header=None` first then calling `detect_header_row` correctly identifies row 4 (index 3) as headers
+- The detection algorithm looks for "mostly strings followed by a row with numbers"
+- `normalize_columns` handles spaces and special chars in column names like "Q1 Budget"
+
+---
+
+### Demo 4: Table boundaries on a single sheet
+
+**Input:**
+```
+Sheet "All_Depts" has two separate tables separated by 2 blank rows:
+  Rows 1-15: Engineering expenses
+  Rows 16-17: blank
+  Rows 18-35: Marketing expenses
+Task: "Ingest both expense tables."
+```
+
+**Correct Output:**
+```python
+df_raw = pd.read_excel("file.xlsx", sheet_name="All_Depts", header=None)
+boundaries = find_table_boundaries(df_raw)
+# returns [(0, 14), (17, 34)]
+
+tables = []
+for start, end in boundaries:
+    chunk = df_raw.iloc[start:end+1].reset_index(drop=True)
+    header_row = detect_header_row(chunk)
+    headers = chunk.iloc[header_row].tolist()
+    data = chunk.iloc[header_row+1:].copy()
+    data.columns = headers
+    data = normalize_columns(data)
+    tables.append(data)
+
+combined = pd.concat(tables, ignore_index=True)
+```
+
+**Why this is correct:**
+- `find_table_boundaries` correctly identifies the two tables by the blank row gap
+- Each chunk gets its own header detection so tables with different headers are handled independently
+- Concatenating with `ignore_index=True` produces a clean row index
+
+---
+
+### Demo 5: Validation after ingestion catches schema drift
+
+**Input:**
+```
+March file has columns: ["date", "department", "amount", "category"]
+February file had: ["date", "dept", "amount", "cost_category"]
+Task: "Ingest both and concatenate for Q1 analysis."
+```
+
+**Correct Output:**
+```python
+feb_df = ingest_workbook("Feb_expenses.xlsx")["Expenses"]
+mar_df = ingest_workbook("Mar_expenses.xlsx")["Expenses"]
+
+feb_df = normalize_columns(feb_df)
+mar_df = normalize_columns(mar_df)
+
+# Detect schema drift before concat
+feb_cols = set(feb_df.columns)
+mar_cols = set(mar_df.columns)
+added = mar_cols - feb_cols
+dropped = feb_cols - mar_cols
+if added or dropped:
+    print(f"Schema drift detected — added: {added}, dropped: {dropped}")
+    # Apply column mapping from memory/column-mappings.json
+    column_map = {"dept": "department", "cost_category": "category"}
+    feb_df = feb_df.rename(columns=column_map)
+
+combined = pd.concat([feb_df, mar_df], ignore_index=True)
+
+# Validate result
+report = validate_ingested_df(combined, "Q1_combined")
+assert not report["issues"], f"Ingestion validation failed: {report['issues']}"
+```
+
+**Why this is correct:**
+- Normalizing column names before comparison ensures `"Dept "` and `"dept"` are caught as equivalent
+- Schema drift is surfaced explicitly before concat — not silently producing misaligned columns
+- Column mapping is applied from the cognitive memory layer, not hardcoded
+- Post-concat validation catches any remaining issues before downstream analysis
+
+<!-- SDAR_DEMONSTRATIONS_END -->

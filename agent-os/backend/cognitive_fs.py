@@ -97,32 +97,78 @@ class CognitiveFSLoader:
     # Public API
     # ------------------------------------------------------------------
 
-    def load_context(self, task: str) -> dict[str, Any]:
+    @staticmethod
+    def _parse_demonstrations(skill_content: str) -> str:
+        """Extract the SDAR demonstrations block from a skill markdown file.
+
+        Returns the text between SDAR_DEMONSTRATIONS_START and
+        SDAR_DEMONSTRATIONS_END markers, or "" if no block is present.
+        This text becomes privileged context c+ for the SDAR teacher branch.
+        """
+        start_marker = "<!-- SDAR_DEMONSTRATIONS_START -->"
+        end_marker = "<!-- SDAR_DEMONSTRATIONS_END -->"
+        start_idx = skill_content.find(start_marker)
+        end_idx = skill_content.find(end_marker)
+        if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            return ""
+        return skill_content[start_idx + len(start_marker):end_idx].strip()
+
+    def load_context(
+        self,
+        task: str,
+        session: Any = None,
+        top_k_skills: int = 3,
+    ) -> dict[str, Any]:
         """
         Read all relevant agent-config files for *task* and return them
         as a structured dictionary.
 
+        When *session* is provided, skill selection uses the UCB1
+        exploration-exploitation strategy from sdar.UCBSkillSelector.
+        Without a session, falls back to keyword matching (backward compatible).
+
         Keys returned
         -------------
-        soul          – content of soul.md (str | None)
-        knowledge     – {filename: content} for all knowledge/*.md
-        skills        – {filename: content} for *matching* skills/*.md
-        corrections   – content of memory/corrections.md (str | None)
-        schema_cache  – parsed memory/schema-cache.json (dict)
-        column_mappings – parsed memory/column-mappings.json (dict)
-        task          – the original task string
+        soul              – content of soul.md (str | None)
+        knowledge         – {filename: content} for all knowledge/*.md
+        skills            – {filename: content} for *matching* skills/*.md
+        demonstrations    – {filename: demonstrations_text} for selected skills
+        corrections       – content of memory/corrections.md (str | None)
+        schema_cache      – parsed memory/schema-cache.json (dict)
+        column_mappings   – parsed memory/column-mappings.json (dict)
+        task              – the original task string
+        task_type         – inferred task type string (from UCB classifier)
         """
         soul = self._read_file("soul.md")
         knowledge = self._glob_md("knowledge")
-
-        # Load only skills whose content is relevant to the task
         all_skills = self._glob_md("skills")
-        relevant_skills: dict[str, str] = {}
-        for fname, content in all_skills.items():
-            # Match against filename (strip .md) or content body
-            searchable = fname.replace("-", " ").replace("_", " ") + " " + content
-            if self._keyword_match(task, searchable):
-                relevant_skills[fname] = content
+
+        if session is not None:
+            # UCB-based skill selection
+            try:
+                from sdar import UCBSkillSelector, classify_task_type
+                selector = UCBSkillSelector()
+                task_type = classify_task_type(task)
+                selected_fnames = selector.select_skills(
+                    task_description=task,
+                    available_skills=list(all_skills.keys()),
+                    session=session,
+                    top_k=top_k_skills,
+                    task_type=task_type,
+                )
+                relevant_skills = {f: all_skills[f] for f in selected_fnames if f in all_skills}
+            except Exception as exc:
+                logger.warning("UCB skill selection failed, falling back to keyword match: %s", exc)
+                relevant_skills, task_type = self._keyword_select_skills(task, all_skills)
+        else:
+            relevant_skills, task_type = self._keyword_select_skills(task, all_skills)
+
+        # Extract demonstrations for each selected skill (privileged c+)
+        demonstrations: dict[str, str] = {}
+        for fname, content in relevant_skills.items():
+            demo_text = self._parse_demonstrations(content)
+            if demo_text:
+                demonstrations[fname] = demo_text
 
         corrections = self._read_file("memory/corrections.md")
         schema_cache = self._read_json("memory/schema-cache.json")
@@ -132,11 +178,24 @@ class CognitiveFSLoader:
             "soul": soul,
             "knowledge": knowledge,
             "skills": relevant_skills,
+            "demonstrations": demonstrations,
             "corrections": corrections,
             "schema_cache": schema_cache,
             "column_mappings": column_mappings,
             "task": task,
+            "task_type": task_type,
         }
+
+    def _keyword_select_skills(
+        self, task: str, all_skills: dict[str, str]
+    ) -> tuple[dict[str, str], str]:
+        """Keyword-based skill selection (fallback when no DB session available)."""
+        relevant: dict[str, str] = {}
+        for fname, content in all_skills.items():
+            searchable = fname.replace("-", " ").replace("_", " ") + " " + content
+            if self._keyword_match(task, searchable):
+                relevant[fname] = content
+        return relevant, "general"
 
     def assemble_system_prompt(self, context: dict[str, Any]) -> str:
         """
@@ -161,13 +220,33 @@ class CognitiveFSLoader:
                 kb_parts.append(f"## {title}\n\n{content.strip()}")
             sections.append("# Knowledge Base\n\n" + "\n\n---\n\n".join(kb_parts))
 
-        # --- Relevant skills -------------------------------------------------
+        # --- Relevant skills (strip demonstrations block from inline display) ---
         if context.get("skills"):
             skill_parts = []
             for fname, content in context["skills"].items():
                 title = fname.replace("-", " ").replace("_", " ").replace(".md", "").title()
-                skill_parts.append(f"## {title}\n\n{content.strip()}")
+                # Remove the demonstrations block — it's included separately as c+
+                clean_content = re.sub(
+                    r"<!-- SDAR_DEMONSTRATIONS_START -->.*?<!-- SDAR_DEMONSTRATIONS_END -->",
+                    "",
+                    content,
+                    flags=re.DOTALL,
+                ).strip()
+                skill_parts.append(f"## {title}\n\n{clean_content}")
             sections.append("# Available Skills\n\n" + "\n\n---\n\n".join(skill_parts))
+
+        # --- Skill demonstrations (privileged context c+ for SDAR teacher) ---
+        if context.get("demonstrations"):
+            demo_parts = []
+            for fname, demo_text in context["demonstrations"].items():
+                title = fname.replace("-", " ").replace("_", " ").replace(".md", "").title()
+                demo_parts.append(f"## {title} — Examples\n\n{demo_text}")
+            sections.append(
+                "# Skill Demonstrations\n"
+                "> The following concrete examples show correct skill application.\n"
+                "> Treat them as authoritative references for this task.\n\n"
+                + "\n\n---\n\n".join(demo_parts)
+            )
 
         # --- Memory: corrections ---------------------------------------------
         if context.get("corrections"):
