@@ -1,0 +1,2808 @@
+import { useState, useEffect } from "react";
+
+// ─────────────────────────────────────────────
+//  PSEUDO-CODE DATA
+// ─────────────────────────────────────────────
+const pseudoCode = {
+  graphrag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# GraphRAG doesn't embed raw chunks for retrieval.
+# Instead it embeds entity descriptions and community
+# summaries so they can be vector-searched at query time.
+
+def embed_graph_elements(graph, embed_model):
+    """
+    Embed every entity description and every community
+    summary into a vector store for local/global search.
+    """
+    for node in graph.nodes:
+        # Each node stores the entity's name + description
+        # e.g. "NeoChip: a publicly traded semiconductor firm
+        #        specializing in low-power processors for IoT"
+        node.embedding = embed_model.encode(
+            f"{node.name}: {node.description}"
+        )
+
+    for community in graph.communities:
+        # Community summaries are long LLM-generated reports
+        # (hundreds of tokens) — embedded for global search
+        community.embedding = embed_model.encode(
+            community.summary_text
+        )
+
+    return graph  # nodes + communities now have embeddings`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# Two-stage: (1) extract entities/relations per chunk,
+# (2) merge duplicates across chunks into one global KG.
+
+def build_knowledge_graph(chunks, llm):
+    G = Graph()
+
+    for chunk in chunks:
+        # Prompt asks LLM to return structured tuples:
+        # ("entity" | name | type | description)
+        # ("relationship" | src | tgt | desc | strength)
+        raw = llm.extract(GRAPH_EXTRACTION_PROMPT, chunk)
+        entities, relations = parse_tuples(raw)
+
+        for e in entities:
+            if G.has_node(e.name):
+                # Merge: append descriptions, keep max degree
+                G.nodes[e.name].descriptions.append(e.desc)
+            else:
+                G.add_node(e.name, type=e.type, desc=e.desc)
+
+        for r in relations:
+            if G.has_edge(r.src, r.tgt):
+                # Edge weight = number of times relation found
+                G.edges[r.src][r.tgt].weight += 1
+            else:
+                G.add_edge(r.src, r.tgt,
+                           desc=r.desc, weight=1)
+
+    # Summarize merged node descriptions with LLM
+    for node in G.nodes:
+        node.description = llm.summarize(node.descriptions)
+
+    # Detect communities hierarchically with Leiden
+    G.communities = leiden_algorithm(G, resolution=1.0)
+    # Build bottom-up summary tree
+    G = build_community_summaries(G, llm)
+    return G
+
+def build_community_summaries(G, llm):
+    for level in G.community_levels:  # leaf → root
+        for community in level.communities:
+            # Sort edges by (source_degree + target_degree)
+            # to prioritise the most prominent relationships
+            sorted_edges = sorted(
+                community.edges,
+                key=lambda e: e.src.degree + e.tgt.degree,
+                reverse=True
+            )
+            context = build_context_str(sorted_edges)
+            community.summary = llm.summarize(context)
+    return G`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# MAP-REDUCE over community summaries.
+# Every community independently scores + answers,
+# then partial answers are aggregated into one response.
+
+def global_search(query, G, llm, community_level=1):
+    """
+    Global search: sensemaking over the entire corpus.
+    Uses community summaries, NOT raw text chunks.
+    """
+    # Shuffle summaries to prevent position bias,
+    # then split into context-window-sized batches
+    summaries = shuffle(G.communities[community_level])
+    batches   = chunk_to_context_window(summaries)
+
+    # MAP: each batch independently answers the query
+    partial_answers = []
+    for batch in batches:
+        resp = llm.answer(
+            prompt = MAP_PROMPT.format(
+                query=query, context=batch
+            )
+        )
+        # LLM also outputs a helpfulness score 0-100
+        if resp.score > 0:
+            partial_answers.append(resp)
+
+    # REDUCE: sort by score, fill context window greedily
+    partial_answers.sort(key=lambda r: r.score, reverse=True)
+    final_context = fill_context_window(partial_answers)
+
+    return llm.answer(REDUCE_PROMPT.format(
+        query=query, context=final_context
+    ))
+
+def local_search(query, G, vector_store, llm, top_k=10):
+    """
+    Local search: entity-neighbourhood retrieval.
+    Best for specific questions about known entities.
+    """
+    # 1. Embed query and find nearest entity nodes
+    q_emb    = embed(query)
+    top_nodes = vector_store.search(q_emb, k=top_k)
+
+    # 2. Expand: collect entity descriptions, related edges,
+    #    community reports, and linked text chunks
+    context_parts = []
+    for node in top_nodes:
+        context_parts += [node.description]
+        context_parts += [e.description for e in node.edges]
+        context_parts += [node.community.summary]
+        context_parts += [c.text for c in node.source_chunks]
+
+    context = fill_context_window(context_parts)
+    return llm.answer(LOCAL_PROMPT.format(
+        query=query, context=context
+    ))`,
+  },
+
+  drift: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# DRIFT reuses the full GraphRAG embedding index.
+# Community summaries are pre-embedded at index time
+# so the global scan can be done with fast vector search
+# rather than passing all summaries through the LLM.
+
+def embed_for_drift(G, embed_model):
+    """
+    Same as GraphRAG but we also store the community
+    report's 'primer' — a short title/theme extract —
+    separately for fast top-K retrieval.
+    """
+    for community in G.all_communities():
+        # Full summary embedding (used for scoring)
+        community.summary_emb = embed_model.encode(
+            community.summary_text
+        )
+        # Short primer embedding (used for initial scan)
+        community.primer_emb  = embed_model.encode(
+            community.primer          # first 2-3 sentences
+        )
+
+    # Entity embeddings are identical to GraphRAG local
+    for node in G.nodes:
+        node.emb = embed_model.encode(
+            f"{node.name}: {node.description}"
+        )`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# DRIFT uses the exact same KG + community hierarchy
+# as standard GraphRAG — no structural changes.
+# The difference is entirely at *query time*.
+
+# (See GraphRAG graph construction above)
+# What DRIFT adds is a "primer index":
+
+def build_primer_index(G):
+    """
+    For each community, extract a short 2-3 sentence
+    primer that captures the main theme.  This lets
+    DRIFT quickly scan thousands of communities without
+    reading each full summary in the LLM context window.
+    """
+    primer_index = {}
+    for community in G.all_communities():
+        # Primer = first paragraph of the community report,
+        # or an LLM-generated one-line theme label
+        primer_index[community.id] = community.summary[:300]
+    return primer_index`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# DRIFT = global fan-out → local drill-down, one pass.
+# The key insight: generate follow-up questions from the
+# global scan, then answer each locally in parallel.
+
+def drift_search(query, G, vector_store, llm, top_k=5):
+    """
+    Dynamic Reasoning and Inference with
+    Flexible Traversal — single unified query pipeline.
+    """
+
+    # ── STAGE 1: Global Fan-Out ───────────────────────
+    q_emb = embed(query)
+    # Retrieve top-K community summaries by vector sim
+    top_communities = vector_store.search_communities(
+        q_emb, k=top_k
+    )
+    global_context = "\n\n".join(
+        c.summary for c in top_communities
+    )
+    # Ask LLM for a broad answer AND follow-up questions
+    # that would make the answer more complete/precise
+    stage1 = llm.answer(DRIFT_GLOBAL_PROMPT.format(
+        query          = query,
+        context        = global_context,
+        n_followups    = 3,    # how many sub-questions
+    ))
+    # stage1.answer       = initial broad response
+    # stage1.followups    = ["Who specifically...?",
+    #                         "What was the outcome of...?",
+    #                         "When exactly did...?"]
+
+    # ── STAGE 2: Local Drill-Down (parallel) ─────────
+    local_results = []
+    for sub_q in stage1.followups:
+        sub_emb   = embed(sub_q)
+        # Search entity neighborhood for this sub-question
+        top_nodes = vector_store.search_entities(
+            sub_emb, k=8
+        )
+        local_ctx = build_local_context(top_nodes, G)
+        answer    = llm.answer(LOCAL_PROMPT.format(
+            query=sub_q, context=local_ctx
+        ))
+        local_results.append((sub_q, answer))
+
+    # ── STAGE 3: Synthesis ────────────────────────────
+    return llm.synthesize(DRIFT_REDUCE_PROMPT.format(
+        original_query = query,
+        global_answer  = stage1.answer,
+        local_pairs    = local_results,
+    ))`,
+  },
+
+  lazygraphrag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# LazyGraphRAG's revolutionary trade-off:
+# ZERO LLM calls at index time.
+# Embeddings are created only with a lightweight
+# sentence encoder — no summarization, no extraction.
+
+def lazy_index(documents, embed_model):
+    """
+    The entire indexing phase costs ~same as vector RAG.
+    We only embed raw text chunks, nothing else.
+    """
+    index = LazyIndex()
+
+    for doc in documents:
+        chunks = split_into_chunks(doc, size=512)
+        for chunk in chunks:
+            # Standard dense embedding — no LLM involved
+            emb = embed_model.encode(chunk.text)
+            index.add(chunk, emb)
+
+            # Also extract noun phrases with spaCy/NLTK
+            # (cheap NLP, NOT an LLM call)
+            noun_phrases = extract_noun_phrases(chunk.text)
+            index.add_terms(chunk.id, noun_phrases)
+
+    # Build a lightweight co-occurrence graph:
+    # edge(A, B) exists if A and B appear in same chunk
+    index.cooccurrence_graph = build_cooccurrence(
+        index.term_to_chunks
+    )
+    return index   # Done!  Total cost ≈ vector RAG.`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# The "graph" in LazyGraphRAG is deliberately minimal:
+# just a term co-occurrence network, not a KG.
+# No entity typing, no relation extraction, no LLM.
+
+def build_cooccurrence(term_to_chunks):
+    """
+    Build edge(termA, termB) for every pair of noun
+    phrases that co-occur in at least one chunk.
+    Edge weight = number of shared chunks.
+    """
+    G = Graph()
+    for chunk_id, terms in term_to_chunks.items():
+        for t in terms:
+            G.add_node_if_missing(t)
+        # Connect every pair within the same chunk
+        for i, t1 in enumerate(terms):
+            for t2 in terms[i+1:]:
+                if G.has_edge(t1, t2):
+                    G[t1][t2].weight += 1
+                else:
+                    G.add_edge(t1, t2, weight=1)
+    return G
+# Result: a lightweight term graph — fast to build,
+# no LLM involved, but structurally less rich than GraphRAG.`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# The magic happens HERE, not at index time.
+# LazyGraphRAG does on-demand community detection +
+# summarization scoped only to the query-relevant subgraph.
+
+def lazy_search(query, index, embed_model, llm,
+                budget=20):
+    """
+    budget = number of relevance tests to run.
+    Higher budget → better quality, more LLM calls.
+    This is the key tunable quality/cost dial.
+    """
+
+    # ── Step 1: Candidate retrieval (cheap) ──────────
+    q_emb      = embed_model.encode(query)
+    # Dense vector search returns candidate chunks
+    candidates = index.vector_search(q_emb, k=budget * 5)
+
+    # ── Step 2: Graph-guided expansion ───────────────
+    # Extract query's key terms
+    q_terms    = extract_noun_phrases(query)
+    # Walk the co-occurrence graph from query terms
+    # to find structurally related chunks not in top-K
+    related    = graph_expand(
+        index.cooccurrence_graph, q_terms, hops=2
+    )
+    candidates = deduplicate(candidates + related)
+
+    # ── Step 3: Relevance testing (LLM, on-demand) ───
+    # THIS is where LLM is first called — only for
+    # the subset of candidates actually relevant to query
+    scored = []
+    for chunk in candidates[:budget]:
+        score = llm.relevance_score(
+            query=query, passage=chunk.text
+        )   # returns 0.0 – 1.0
+        if score > 0.5:
+            scored.append((score, chunk))
+
+    scored.sort(reverse=True)
+    top_chunks = [c for _, c in scored[:10]]
+
+    # ── Step 4: On-demand summarization ──────────────
+    # Summarize ONLY the relevant subgraph, not the corpus
+    summary_context = llm.summarize(
+        [c.text for c in top_chunks],
+        focus=query    # query-focused summarization
+    )
+
+    return llm.answer(
+        ANSWER_PROMPT.format(
+            query=query, context=summary_context
+        )
+    )`,
+  },
+
+  lightrag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# LightRAG builds TWO separate embedding indexes:
+# one for specific entities/relations (low-level),
+# one for abstract concepts/themes (high-level).
+# Both are created at index time and updated incrementally.
+
+def build_dual_embeddings(documents, embed_model, llm):
+    low_level_store  = VectorStore()
+    high_level_store = VectorStore()
+
+    for doc in documents:
+        chunks = split(doc)
+        for chunk in chunks:
+
+            # ── Low-level: specific entity embeddings ──
+            # LLM extracts (entity, relation, entity) triples
+            triples = llm.extract_triples(chunk.text)
+            for triple in triples:
+                # Embed the triple as a natural sentence:
+                # "NeoChip was acquired by Quantum Systems"
+                text = triple_to_sentence(triple)
+                emb  = embed_model.encode(text)
+                low_level_store.add(
+                    id=triple.id, emb=emb,
+                    payload=triple, chunk_ref=chunk.id
+                )
+
+            # ── High-level: concept/theme embeddings ──
+            # LLM extracts abstract concepts (no schema)
+            concepts = llm.extract_concepts(chunk.text)
+            for concept in concepts:
+                # e.g. "semiconductor industry consolidation"
+                emb = embed_model.encode(concept.description)
+                high_level_store.add(
+                    id=concept.id, emb=emb,
+                    payload=concept, chunk_ref=chunk.id
+                )
+
+    return low_level_store, high_level_store`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# LightRAG builds ONE flat graph (no communities)
+# with both entity nodes AND concept nodes.
+# The key feature: incremental updates affect only
+# the subgraph touched by the new document.
+
+def build_lightrag_graph(documents, llm):
+    G = DualLevelGraph()   # nodes can be entity OR concept
+
+    for doc in documents:
+        chunks = split(doc)
+        for chunk in chunks:
+
+            # Low-level: typed entity-relation triples
+            # Schema: (entity_name, entity_type,
+            #          relation, entity_name, entity_type)
+            triples = llm.extract_triples(chunk)
+            for t in triples:
+                G.add_or_merge_entity(t.src, t.src_type)
+                G.add_or_merge_entity(t.tgt, t.tgt_type)
+                G.add_relation_edge(
+                    src=t.src, tgt=t.tgt,
+                    rel=t.relation, weight=1,
+                    source_chunk=chunk.id
+                )
+
+            # High-level: abstract concept nodes
+            # connected by semantic proximity edges
+            concepts = llm.extract_concepts(chunk)
+            for c in concepts:
+                G.add_concept_node(c.text, c.description)
+            # Connect concepts that co-occur in same chunk
+            G.connect_cooccurring_concepts(concepts, chunk.id)
+
+    return G
+
+def incremental_update(G, new_doc, llm):
+    """
+    Only re-processes nodes touched by new_doc.
+    Old nodes are untouched — this is LightRAG's
+    major practical advantage over GraphRAG.
+    """
+    affected_nodes = set()
+    for chunk in split(new_doc):
+        new_triples   = llm.extract_triples(chunk)
+        new_concepts  = llm.extract_concepts(chunk)
+        affected_nodes |= update_graph(G, new_triples,
+                                        new_concepts)
+    re_embed(affected_nodes)   # only update changed nodes
+    return G`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# LightRAG classifies the query and routes it:
+# specific → low-level entity search
+# broad    → high-level concept search
+# mixed    → both indexes combined
+
+def lightrag_retrieve(query, G,
+                      low_store, high_store,
+                      embed_model, llm):
+
+    # Classify query type (fast heuristic or LLM call)
+    q_type = classify_query(query)
+    # Returns: "specific" | "broad" | "mixed"
+
+    q_emb  = embed_model.encode(query)
+
+    if q_type in ("specific", "mixed"):
+        # ── Low-level search ──────────────────────────
+        # Retrieve top-K entity/relation triples by cosine
+        entity_hits = low_store.search(q_emb, k=20)
+        # Graph expansion: include 1-hop neighbours
+        # of matched entities for richer context
+        for hit in entity_hits:
+            neighbours = G.get_neighbours(hit.entity, hops=1)
+            entity_hits += neighbours
+        entity_context = format_triples(
+            deduplicate(entity_hits)
+        )
+
+    if q_type in ("broad", "mixed"):
+        # ── High-level search ─────────────────────────
+        # Retrieve top-K concept nodes by cosine sim
+        concept_hits = high_store.search(q_emb, k=10)
+        # Walk concept-to-concept edges for related themes
+        concept_chain = G.traverse_concept_edges(
+            seeds = [h.concept for h in concept_hits],
+            depth = 2
+        )
+        concept_context = format_concepts(concept_chain)
+
+    # Merge contexts based on query type
+    if   q_type == "specific": context = entity_context
+    elif q_type == "broad":    context = concept_context
+    else:                      context = (entity_context
+                                          + concept_context)
+
+    return llm.answer(ANSWER_PROMPT.format(
+        query=query, context=context
+    ))`,
+  },
+
+  hipporag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# HippoRAG separates two kinds of representation,
+# mirroring the brain's neocortex/hippocampus split:
+#
+#  Neocortex  → dense passage embeddings (the "memory")
+#  Hippocampus → sparse KG node embeddings (the "index")
+
+def hipporag_embed(passages, embed_model):
+    """
+    Offline indexing: build both memory stores.
+    """
+    neocortex   = VectorStore()   # passage-level
+    hippocampus = VectorStore()   # entity node-level
+
+    for passage in passages:
+        # ── Neocortex: embed the full passage ─────────
+        p_emb = embed_model.encode(passage.text)
+        neocortex.add(id=passage.id, emb=p_emb,
+                      text=passage.text)
+
+        # ── Hippocampus: embed each entity node ───────
+        # Entities come from OpenIE triples extracted by LLM
+        triples = extract_open_ie(passage.text)
+        for triple in triples:
+            for entity in [triple.subject, triple.object]:
+                if not hippocampus.has(entity):
+                    e_emb = embed_model.encode(entity)
+                    hippocampus.add(
+                        id=entity, emb=e_emb,
+                        linked_passages=[]
+                    )
+                # Link entity → passage it appeared in
+                hippocampus.link(entity, passage.id)
+
+    return neocortex, hippocampus`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# The KG is deliberately *schemaless* — no predefined
+# entity types or relation categories.
+# Open IE extracts (subject, predicate, object) freely.
+# The graph acts purely as an association index,
+# mirroring hippocampal sparse pattern indexing.
+
+def build_hipporag_kg(passages, llm):
+    KG = SchemalessGraph()
+
+    for passage in passages:
+        # OpenIE: unconstrained triple extraction
+        # e.g. ("HippoRAG", "was published at", "NeurIPS 2024")
+        #      ("NeurIPS", "is a conference", "AI")
+        triples = llm.open_ie(passage.text)
+
+        for t in triples:
+            # Add subject and object as nodes
+            KG.add_node_if_missing(t.subject)
+            KG.add_node_if_missing(t.object)
+
+            # Add the relation as a labelled edge
+            KG.add_edge(
+                src    = t.subject,
+                tgt    = t.object,
+                label  = t.predicate,
+                source = passage.id
+            )
+
+    # ── Node specificity weights ───────────────────────
+    # Rare entities (low document frequency) get higher
+    # weight in PageRank — they're more discriminative.
+    # Mirrors "node specificity" in neuroscience.
+    for node in KG.nodes:
+        doc_freq      = KG.count_passages(node)
+        node.idf_weight = 1.0 / log(1 + doc_freq)
+
+    return KG`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# The retrieval mimics hippocampal *pattern completion*:
+# a query cue activates a few seed nodes,
+# then Personalized PageRank spreads activation
+# through the graph to find associated passages.
+
+def hipporag_retrieve(query, KG, neocortex,
+                       hippocampus, embed_model,
+                       llm, top_k=5, ppr_alpha=0.85):
+
+    # ── Step 1: Named entity recognition on query ─────
+    # Identify which entities in the query are the seeds
+    q_entities = llm.ner(query)
+    # e.g. query = "Who is the CEO of NeoChip?"
+    #      q_entities = ["NeoChip"]
+
+    # ── Step 2: Match query entities → KG nodes ───────
+    # Use embedding similarity to handle synonyms/variants
+    seed_nodes = {}
+    for entity in q_entities:
+        e_emb    = embed_model.encode(entity)
+        # Find the closest matching KG node
+        match    = hippocampus.nearest(e_emb, k=3)
+        for m in match:
+            # Weight seed by IDF (rare entities → higher)
+            seed_nodes[m.id] = m.idf_weight
+
+    # ── Step 3: Personalized PageRank ─────────────────
+    # Standard PageRank: each node's importance is a
+    # function of its neighbours' importance (global).
+    # *Personalized* PPR: at each random-walk step,
+    # with probability (1-alpha) teleport back to seeds.
+    # Result: nodes connected to seeds get high scores.
+
+    ppr_scores = personalized_pagerank(
+        graph     = KG,
+        seed_dict = seed_nodes,   # {node_id: seed_prob}
+        alpha     = ppr_alpha,    # 0.85 = standard value
+        max_iter  = 100
+    )
+    # ppr_scores: {node_id: score}  (sums to 1.0)
+
+    # ── Step 4: Passage scoring ────────────────────────
+    # Score each passage by the MAX PPR score of its entities
+    passage_scores = defaultdict(float)
+    for node_id, ppr_val in ppr_scores.items():
+        for passage_id in KG.node_passages(node_id):
+            passage_scores[passage_id] = max(
+                passage_scores[passage_id], ppr_val
+            )
+
+    # ── Step 5: Retrieve top passages ─────────────────
+    ranked = sorted(passage_scores.items(),
+                    key=lambda x: x[1], reverse=True)
+    top_passages = [neocortex.get(pid)
+                    for pid, _ in ranked[:top_k]]
+
+    return llm.answer(
+        ANSWER_PROMPT.format(
+            query   = query,
+            context = "\n\n".join(p.text for p in
+                                   top_passages)
+        )
+    )`,
+  },
+
+  raptor: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# RAPTOR embeds at EVERY level of its tree.
+# Leaf nodes (raw chunks) and internal nodes
+# (LLM summaries) all get vector representations,
+# forming a multi-scale searchable index.
+
+def raptor_embed(tree, embed_model):
+    """
+    Walk all levels of the tree and embed each node.
+    The tree has been built before this step.
+    """
+    for level in range(tree.num_levels):
+        for node in tree.nodes_at_level(level):
+            if level == 0:
+                # Leaf: embed the raw chunk text
+                node.embedding = embed_model.encode(
+                    node.text
+                )
+            else:
+                # Internal: embed the LLM-generated summary.
+                # This summary is SHORTER and more abstract
+                # than the chunks it represents.
+                node.embedding = embed_model.encode(
+                    node.summary
+                )
+    # Result: the vector store has embeddings at all levels.
+    # A dense query will naturally match the "right" level:
+    # specific queries → leaf embeddings
+    # abstract queries → high-level summary embeddings`,
+
+    graph: `# ── TREE CONSTRUCTION PHASE ───────────────────────
+# RAPTOR builds a tree, not a graph.
+# No entity extraction — purely semantic clustering.
+# The recursion stops when clusters are too small
+# to summarize meaningfully.
+
+def build_raptor_tree(documents, embed_model, llm,
+                       max_cluster_size=100,
+                       min_cluster_size=5):
+    # Level 0: split all documents into chunks
+    chunks = []
+    for doc in documents:
+        chunks.extend(split_into_chunks(doc, size=512))
+
+    # Embed all chunks
+    for chunk in chunks:
+        chunk.emb = embed_model.encode(chunk.text)
+
+    tree    = Tree(leaves=chunks)
+    current = chunks    # nodes at current level
+
+    level = 1
+    while len(current) > min_cluster_size:
+
+        # ── Cluster ──────────────────────────────────
+        # Gaussian Mixture Model (soft clustering) on
+        # UMAP-reduced embeddings.
+        # Soft = a node can belong to multiple clusters,
+        # ensuring information isn't lost at boundaries.
+        reduced_embs = umap_reduce(
+            [n.emb for n in current], n_components=10
+        )
+        cluster_labels = gaussian_mixture_model(
+            reduced_embs,
+            max_clusters = len(current) // min_cluster_size
+        )
+
+        # ── Summarize each cluster ────────────────────
+        new_level_nodes = []
+        for cluster_id in unique(cluster_labels):
+            members = [n for n, l in
+                       zip(current, cluster_labels)
+                       if l == cluster_id]
+
+            if len(members) < min_cluster_size:
+                continue   # too small, skip
+
+            # Concatenate member texts into one context
+            combined_text = "\n\n".join(
+                n.text if n.level == 0 else n.summary
+                for n in members
+            )
+            # LLM writes a summary of this cluster
+            summary = llm.summarize(combined_text)
+
+            # Create parent node
+            parent = TreeNode(
+                summary  = summary,
+                children = members,
+                level    = level,
+                emb      = embed_model.encode(summary)
+            )
+            tree.add_node(parent, level)
+            new_level_nodes.append(parent)
+
+        current = new_level_nodes
+        level  += 1
+
+    return tree`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# RAPTOR offers two retrieval strategies:
+# (1) Tree traversal: top-down, level by level
+# (2) Collapsed flat search: search all levels at once
+# Strategy (2) is usually better in practice.
+
+def raptor_retrieve_collapsed(query, tree,
+                               embed_model, top_k=5):
+    """
+    Flatten all tree levels into one vector store
+    and do a single similarity search.
+    The model naturally finds the right granularity.
+    """
+    q_emb = embed_model.encode(query)
+
+    # All nodes (leaves + internals) in one flat index
+    all_nodes = tree.all_nodes()
+    scores    = cosine_similarity(q_emb,
+                    [n.embedding for n in all_nodes])
+    ranked    = sorted(zip(all_nodes, scores),
+                       key=lambda x: x[1], reverse=True)
+
+    # Retrieve top-K nodes and collect their texts
+    # Prefer summaries for internal nodes,
+    # raw text for leaf nodes
+    context_pieces = []
+    seen_content   = set()
+    for node, score in ranked[:top_k]:
+        text = node.summary if node.level > 0 else node.text
+        if text not in seen_content:
+            context_pieces.append(text)
+            seen_content.add(text)
+
+    return "\n\n---\n\n".join(context_pieces)
+
+def raptor_retrieve_tree_traversal(query, tree,
+                                    embed_model,
+                                    threshold=0.7):
+    """
+    Top-down: start at root, descend only into
+    subtrees whose summary is above threshold.
+    More targeted but risks missing info.
+    """
+    q_emb   = embed_model.encode(query)
+    context = []
+    queue   = [tree.root]
+
+    while queue:
+        node  = queue.pop(0)
+        score = cosine_similarity(q_emb, node.embedding)
+
+        if score >= threshold:
+            if node.is_leaf():
+                context.append(node.text)
+            else:
+                # Descend into this subtree
+                queue.extend(node.children)
+
+    return "\n\n".join(context)`,
+  },
+
+  gfmrag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# GFM-RAG is unique: the "embedding" IS the GNN.
+# Instead of encoding text into vectors, it encodes
+# the graph structure itself into node representations
+# through message-passing layers.
+
+def gfmrag_embed(G, query, gnn_model):
+    """
+    At retrieval time, the GNN takes the graph + query
+    and produces a score for each node — no separate
+    embedding store needed for graph traversal.
+    """
+
+    # ── Universal graph format ────────────────────────
+    # GFM-RAG converts any graph type into one schema:
+    # nodes have a text description + type label
+    # edges have a relation label + direction
+    std_graph = convert_to_universal_format(G)
+    # Works for:
+    #   Knowledge graphs   (entity → relation → entity)
+    #   Document graphs    (chunk → semantic_link → chunk)
+    #   Hierarchical graphs (community → contains → node)
+
+    # ── Query-conditioned node features ──────────────
+    # Each node's initial feature = concat of:
+    #   (a) text embedding of its description
+    #   (b) query embedding (same for all nodes)
+    #   (c) relation-type one-hot encoding
+    text_embedder = SentenceTransformer("bge-small")
+    q_emb = text_embedder.encode(query)
+
+    for node in std_graph.nodes:
+        node_emb   = text_embedder.encode(node.description)
+        node.feat  = concat(node_emb, q_emb,
+                             node.type_onehot)
+
+    return std_graph  # ready for GNN forward pass`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# GFM-RAG accepts any input graph structure.
+# During pre-training, it sees many different KGs
+# and learns generalizable structural reasoning patterns.
+
+def build_universal_index(documents, llm, graph_type):
+    """
+    graph_type: "knowledge_graph" | "document_graph"
+                | "hierarchical"
+    GFM-RAG normalises all of them to one schema.
+    """
+    if graph_type == "knowledge_graph":
+        # Standard entity-relation KG extraction (like GraphRAG)
+        G = extract_entity_relation_graph(documents, llm)
+
+    elif graph_type == "document_graph":
+        # Nodes = chunks, Edges = semantic similarity
+        chunks = [split(doc) for doc in documents]
+        G = Graph()
+        for i, c1 in enumerate(chunks):
+            G.add_node(c1)
+            for c2 in chunks[i+1:]:
+                sim = cosine_similarity(embed(c1), embed(c2))
+                if sim > 0.75:
+                    G.add_edge(c1, c2, weight=sim)
+
+    elif graph_type == "hierarchical":
+        # Same as RAPTOR tree, serialized as a graph
+        tree = build_raptor_tree(documents)
+        G    = tree_to_graph(tree)
+
+    # ── Standardize to Universal Graph Index ──────────
+    # Every node gets: id, description, type
+    # Every edge gets: src, tgt, relation_label, weight
+    std_G = standardize(G)
+    return std_G
+
+# ── GNN Pre-Training (offline, done once) ────────────
+def pretrain_gnn(training_graphs, gnn):
+    """
+    Train on many diverse KGs simultaneously.
+    Task: given a query, predict which nodes are
+    relevant (binary node classification).
+    This teaches the GNN graph reasoning patterns
+    that generalise to unseen graphs at inference time.
+    """
+    for (graph, query, relevant_nodes) in training_graphs:
+        logits = gnn.forward(graph, query)
+        loss   = binary_cross_entropy(
+            logits, relevant_nodes
+        )
+        loss.backward()
+        optimizer.step()`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# The GNN performs multi-hop reasoning in ONE forward
+# pass — the key efficiency gain over iterative methods.
+# No LLM is called during graph traversal at all.
+
+def gfmrag_retrieve(query, std_G, gnn_model,
+                     embed_model, llm, top_k=10):
+
+    # ── Step 1: Query-conditioned node features ───────
+    q_emb = embed_model.encode(query)
+    for node in std_G.nodes:
+        node.feat = concat(
+            embed_model.encode(node.description), q_emb
+        )
+
+    # ── Step 2: GNN forward pass ──────────────────────
+    # Message passing: each node aggregates information
+    # from its neighbours and updates its representation.
+    # After L layers, each node's representation encodes
+    # its L-hop neighbourhood structure.
+    #
+    # Layer update rule (simplified):
+    #   h_v^(l+1) = AGGREGATE(
+    #       h_v^(l),
+    #       {h_u^(l) for u in neighbours(v)},
+    #       edge_features(v, u)
+    #   )
+    node_logits = gnn_model.forward(
+        node_features = [n.feat for n in std_G.nodes],
+        edge_index    = std_G.edge_index,
+        edge_attr     = std_G.edge_attr,
+        query_emb     = q_emb
+    )
+    # node_logits[i] = relevance score for node i
+    # Computed in ONE forward pass — no iteration!
+
+    # ── Step 3: Subgraph extraction ───────────────────
+    top_node_ids = argsort(node_logits)[-top_k:]
+
+    # Include 1-hop neighbours for context completeness
+    subgraph_nodes = expand_to_subgraph(
+        std_G, top_node_ids, hops=1
+    )
+    context = format_subgraph_as_text(
+        std_G, subgraph_nodes
+    )
+    # Context looks like:
+    # "NeoChip (company): low-power processor firm.
+    #  ACQUIRED_BY → Quantum Systems (company): ...
+    #  LISTED_ON → NewTech Exchange (market): ..."
+
+    # ── Step 4: LLM generates the final answer ────────
+    return llm.answer(ANSWER_PROMPT.format(
+        query=query, context=context
+    ))`,
+  },
+
+  pathrag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# PathRAG embeds at the RELATION (edge) level,
+# not just at the node level.
+# Each path of the form (A → rel → B → rel → C)
+# gets its own embedding for fast path relevance scoring.
+
+def pathrag_embed(G, embed_model):
+    """
+    Pre-compute embeddings for nodes AND relation paths.
+    """
+    node_store = VectorStore()
+    path_store = VectorStore()
+
+    # ── Node embeddings ───────────────────────────────
+    for node in G.nodes:
+        emb = embed_model.encode(
+            f"{node.name}: {node.description}"
+        )
+        node_store.add(node.id, emb, node)
+
+    # ── Path embeddings (up to K hops) ───────────────
+    for src_node in G.nodes:
+        for path in G.enumerate_paths(src_node,
+                                       max_hops=3):
+            # Serialize path as a sentence:
+            # "NeoChip was_acquired_by Quantum Systems
+            #  which was_founded_by Alice Chen"
+            path_sentence = path_to_sentence(path)
+            path_emb      = embed_model.encode(path_sentence)
+            path_store.add(
+                id      = path.id,
+                emb     = path_emb,
+                payload = path
+            )
+    return node_store, path_store`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# PathRAG uses a standard entity-relation KG,
+# then pre-computes all paths up to K hops
+# and assigns flow-based resource scores to them.
+
+def build_pathrag_index(documents, llm, embed_model,
+                         max_hops=3, decay=0.5):
+    # ── Standard KG extraction ────────────────────────
+    G = extract_entity_relation_kg(documents, llm)
+
+    # ── Pre-compute paths + flow scores ───────────────
+    # Flow score models "information flow" along a path:
+    # each hop decays the resource by factor 'decay'.
+    # Short direct paths score higher than long roundabout ones.
+
+    path_index = {}
+    for node in G.nodes:
+        resource = {node.id: 1.0}   # start with full resource
+
+        for hop in range(1, max_hops + 1):
+            new_resource = {}
+            for n_id, r in resource.items():
+                for neighbour in G.neighbours(n_id):
+                    edge_w = G.edge_weight(n_id, neighbour)
+                    # Resource flows along edge, decayed
+                    new_resource[neighbour] = (
+                        new_resource.get(neighbour, 0)
+                        + r * decay * edge_w
+                    )
+            resource = new_resource
+
+            # Record all paths at this hop depth
+            for end_node, flow_score in resource.items():
+                path = reconstruct_path(node.id, end_node,
+                                        G, hop)
+                path.flow_score = flow_score
+                path_index[path.id] = path
+
+    # ── Embed all paths ───────────────────────────────
+    for path in path_index.values():
+        path.embedding = embed_model.encode(
+            path_to_sentence(path)
+        )
+
+    return G, path_index`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# PathRAG replaces neighbourhood expansion with
+# precision path retrieval.
+# Instead of "give me all nodes near entity X",
+# it asks "give me the most relevant relational
+# chains between entities relevant to this query".
+
+def pathrag_retrieve(query, G, path_index,
+                      node_store, path_store,
+                      embed_model, llm,
+                      top_nodes=5, top_paths=10):
+
+    q_emb = embed_model.encode(query)
+
+    # ── Step 1: Find anchor nodes ─────────────────────
+    # Which entities in the KG are most relevant to query?
+    anchor_hits = node_store.search(q_emb, k=top_nodes)
+    anchor_ids  = {h.node.id for h in anchor_hits}
+
+    # ── Step 2: Retrieve relevant paths ───────────────
+    # Two-stage scoring:
+    # (a) vector similarity of path embedding to query
+    # (b) flow score (precomputed path strength)
+    path_hits = path_store.search(q_emb, k=top_paths * 5)
+
+    # ── Step 3: Pruning ───────────────────────────────
+    # Keep only paths that:
+    # (a) start OR end at an anchor node
+    # (b) have flow_score above threshold
+    # (c) have vector similarity above threshold
+    pruned = []
+    for hit in path_hits:
+        path = hit.path
+        starts_at_anchor = path.start_node in anchor_ids
+        ends_at_anchor   = path.end_node   in anchor_ids
+        if ((starts_at_anchor or ends_at_anchor)
+                and path.flow_score > 0.1
+                and hit.score       > 0.5):
+            pruned.append(path)
+        if len(pruned) == top_paths:
+            break
+
+    # ── Step 4: Format evidence chains ───────────────
+    # Each path becomes one line in the context:
+    # "NeoChip → was_acquired_by → Quantum Systems
+    #           → was_founded_by → Alice Chen (2010)"
+    evidence_chains = "\n".join(
+        path_to_sentence(p) for p in pruned
+    )
+
+    return llm.answer(PATHRAG_PROMPT.format(
+        query    = query,
+        evidence = evidence_chains
+    ))`,
+  },
+
+  tgrag: {
+    embedding: `# ── EMBEDDING PHASE ──────────────────────────────
+# TG-RAG adds a TIME dimension to embeddings.
+# The same fact at different times gets different
+# representations — preventing temporal confusion.
+
+def tgrag_embed(documents, embed_model):
+    """
+    Embed each fact WITH its timestamp encoded
+    so the model can distinguish temporal variants.
+    """
+    fact_store = VectorStore()
+    time_store = VectorStore()
+
+    for doc in documents:
+        timestamp = doc.publication_date  # required field
+        chunks    = split(doc)
+
+        for chunk in chunks:
+            facts = extract_facts_with_time(chunk)
+            # Returns: (subject, predicate, object, time_expr)
+
+            for fact in facts:
+                # ── Temporal fact embedding ───────────
+                # Encode the fact as text WITH its time:
+                # "CEO of NeoChip [as of: 2024] = Alice Chen"
+                # vs
+                # "CEO of NeoChip [as of: 2022] = Bob Park"
+                temporal_text = (
+                    f"{fact.subject} {fact.predicate} "
+                    f"{fact.object} [as of: {fact.time}]"
+                )
+                t_emb = embed_model.encode(temporal_text)
+                fact_store.add(
+                    id        = fact.id,
+                    emb       = t_emb,
+                    payload   = fact,
+                    timestamp = fact.time
+                )
+
+        # ── Time summary embeddings ───────────────────
+        # High-level summaries for each time period
+        # allow "what happened in Q3 2024?" queries
+        period_summary = llm.summarize(
+            [c.text for c in chunks], focus=str(timestamp)
+        )
+        p_emb = embed_model.encode(period_summary)
+        time_store.add(timestamp, p_emb, period_summary)
+
+    return fact_store, time_store`,
+
+    graph: `# ── GRAPH CONSTRUCTION PHASE ─────────────────────
+# TG-RAG builds a BI-LEVEL temporal graph:
+# Level 1: Temporal Knowledge Graph (TKG)
+#          Facts with explicit timestamps as edge attrs
+# Level 2: Time Hierarchy Graph (THG)
+#          day → month → year → decade hierarchy
+
+def build_tgrag(documents, llm):
+
+    # ── Level 1: Temporal Knowledge Graph ────────────
+    TKG = TemporalGraph()  # edges carry timestamps
+
+    for doc in documents:
+        ts    = doc.publication_date
+        facts = llm.extract_facts(doc.text)
+
+        for f in facts:
+            TKG.add_node_if_missing(f.subject)
+            TKG.add_node_if_missing(f.object)
+            # Key: SAME fact at DIFFERENT times = DIFFERENT edges
+            # "CEO(NeoChip)=Alice" at t1 ≠ t2
+            TKG.add_temporal_edge(
+                src       = f.subject,
+                tgt       = f.object,
+                rel       = f.predicate,
+                timestamp = ts,
+                chunk_id  = doc.chunk_id
+            )
+    # Example TKG:
+    # NeoChip --[CEO, t=2022]--> Bob Park
+    # NeoChip --[CEO, t=2024]--> Alice Chen  (different edge!)
+    # NeoChip --[Listed_On, t=2023]--> NewTech Exchange
+
+    # ── Level 2: Time Hierarchy Graph ────────────────
+    THG = TimeHierarchyGraph()
+    # Build time hierarchy: day → month → year → era
+    for ts in TKG.all_timestamps():
+        day   = THG.get_or_create_day_node(ts)
+        month = THG.get_or_create_month_node(ts)
+        year  = THG.get_or_create_year_node(ts)
+        THG.link(day, month)
+        THG.link(month, year)
+
+    # Generate summaries for each time node
+    # (only generate for NEW time nodes on incremental update)
+    for time_node in THG.nodes:
+        events = TKG.events_in_period(time_node.period)
+        time_node.summary = llm.summarize(
+            [e.text for e in events],
+            focus = f"key events in {time_node.label}"
+        )
+
+    return TKG, THG`,
+
+    retrieval: `# ── SEMANTIC RETRIEVAL PHASE ─────────────────────
+# TG-RAG parses the temporal scope of the query,
+# then restricts ALL graph traversal to that window.
+# This prevents answers from mixing facts across times.
+
+def tgrag_retrieve(query, TKG, THG,
+                    fact_store, time_store,
+                    embed_model, llm):
+
+    # ── Step 1: Temporal Query Decomposition (TQD) ────
+    # Parse out the time constraints from the query.
+    # e.g. "Who was CEO of NeoChip in 2023?"
+    #       → entity="NeoChip", role="CEO", time="2023"
+    # e.g. "What happened to NeoChip between 2022-2024?"
+    #       → time_range=(2022, 2024)
+    tq = llm.decompose_temporal(query)
+    # tq.entities    = ["NeoChip"]
+    # tq.time_range  = (date(2022,1,1), date(2024,12,31))
+    # tq.time_type   = "range" | "point" | "relative"
+    #                   | "before" | "after" | "current"
+
+    # ── Step 2: Time-scoped subgraph extraction ───────
+    # Only traverse TKG edges WITHIN the temporal window
+    def time_filter(edge):
+        return (tq.time_range[0]
+                <= edge.timestamp
+                <= tq.time_range[1])
+
+    scoped_subgraph = TKG.subgraph(
+        seed_entities = tq.entities,
+        edge_filter   = time_filter,
+        max_hops      = 2
+    )
+
+    # ── Step 3: Time hierarchy context ───────────────
+    # Add broad trend summaries from the THG for context
+    relevant_periods = THG.get_periods_in_range(
+        tq.time_range
+    )
+    temporal_context = "\n".join(
+        p.summary for p in relevant_periods
+    )
+
+    # ── Step 4: Temporal vector search ───────────────
+    # Also search the fact store but with time metadata filter
+    q_emb = embed_model.encode(query)
+    fact_hits = fact_store.search(
+        emb        = q_emb,
+        k          = 10,
+        filter_fn  = lambda f: time_filter(f)  # ← key!
+    )
+
+    # ── Step 5: Compose context + answer ─────────────
+    subgraph_text  = format_temporal_subgraph(scoped_subgraph)
+    fact_text      = "\n".join(f.payload.text
+                                for f in fact_hits)
+
+    return llm.answer(TGRAG_PROMPT.format(
+        query            = query,
+        time_range       = tq.time_range,
+        subgraph_context = subgraph_text,
+        temporal_trends  = temporal_context,
+        supporting_facts = fact_text,
+    ))`,
+  },
+};
+
+// ─────────────────────────────────────────────
+//  REST OF SYSTEMS DATA (same as before)
+// ─────────────────────────────────────────────
+const systems = [
+  {
+    id: "graphrag", name: "Microsoft GraphRAG", year: "April 2024",
+    origin: "Microsoft Research", tagline: "Global sensemaking over entire corpora",
+    color: "#00B4D8", accent: "#0077B6", icon: "⬡",
+    summary: "The original. GraphRAG solves the fundamental failure of vector RAG on global questions — queries that require understanding an entire corpus rather than retrieving a single relevant chunk. It does this by building a knowledge graph, detecting communities, and pre-generating LLM summaries of each community, enabling map-reduce style answering over the whole dataset.",
+    strengths: ["Global sensemaking", "Hierarchical context", "Rich entity relationships", "Community-level insights"],
+    weaknesses: ["100–1000x indexing cost", "Slow to update", "Large LLM token usage"],
+    steps: [
+      { id: 1, label: "Source Documents", desc: "Raw corpus of texts, PDFs, transcripts" },
+      { id: 2, label: "Chunking", desc: "Split into ~600-token overlapping chunks" },
+      { id: 3, label: "Entity & Relation Extraction", desc: "LLM extracts named entities, descriptions, typed relationships with strength scores" },
+      { id: 4, label: "Knowledge Graph", desc: "Nodes = entities, Edges = relationships (weighted by duplicate count)" },
+      { id: 5, label: "Leiden Community Detection", desc: "Hierarchical graph partitioning into nested communities of strongly-related nodes" },
+      { id: 6, label: "Community Summaries", desc: "LLM generates report-like summaries for each community, bottom-up through hierarchy" },
+      { id: 7, label: "Query → Map Step", desc: "Each community summary independently answers the query with a helpfulness score 0–100" },
+      { id: 8, label: "Reduce → Final Answer", desc: "Answers sorted by score, iteratively combined into a global final answer" },
+    ],
+    diagram: "pipeline",
+    insight: "The Leiden algorithm finds communities by maximizing modularity — groups of nodes more connected internally than externally. This naturally surfaces thematic clusters like 'characters in Act 2' or 'companies in pharma sector' without being told what themes exist.",
+    papers: [
+      { label: "Paper (arXiv)", url: "https://arxiv.org/abs/2404.16130" },
+      { label: "GitHub", url: "https://github.com/microsoft/graphrag" },
+    ],
+  },
+  {
+    id: "drift", name: "DRIFT Search", year: "October 2024",
+    origin: "Microsoft Research", tagline: "Dynamic bridging of local and global retrieval",
+    color: "#F77F00", accent: "#D62828", icon: "⟳",
+    summary: "GraphRAG's original two modes — global search and local search — were separate and incompatible. Global search gives breadth but no depth. Local search gives depth but misses the big picture. Almost every real query needs both. DRIFT (Dynamic Reasoning and Inference with Flexible Traversal) solves this by using a single query mechanism that starts globally, then drills down locally.",
+    strengths: ["Bridges local + global", "Context-aware follow-up", "Better real-world query coverage"],
+    weaknesses: ["Multiple LLM passes per query", "Still requires full GraphRAG index"],
+    steps: [
+      { id: 1, label: "User Query", desc: "Any natural language question — local or global" },
+      { id: 2, label: "Global Scan", desc: "Query compared against top-K community summary reports to identify relevant themes" },
+      { id: 3, label: "Initial Answer + Follow-ups", desc: "LLM generates a broad initial answer AND a list of specific follow-up sub-questions that need drilling into" },
+      { id: 4, label: "Local Search per Follow-up", desc: "Each sub-question executed via local entity-neighborhood search on the knowledge graph" },
+      { id: 5, label: "Evidence Synthesis", desc: "Local results merged with global context" },
+      { id: 6, label: "Final Answer", desc: "Combined broad + specific answer returned to user" },
+    ],
+    diagram: "fork",
+    insight: "Think of DRIFT like a journalist: first scan the headlines (global), then pick the most relevant stories and read them in depth (local). The key innovation is generating the sub-questions automatically from the global scan — the system decides what to drill into.",
+    papers: [
+      { label: "Microsoft Research Blog", url: "https://www.microsoft.com/en-us/research/blog/introducing-drift-search-combining-global-and-local-search-methods-to-improve-quality-and-efficiency/" },
+      { label: "Docs", url: "https://microsoft.github.io/graphrag/query/drift_search/" },
+    ],
+  },
+  {
+    id: "lazygraphrag", name: "LazyGraphRAG", year: "December 2024",
+    origin: "Microsoft Research", tagline: "0.1% of GraphRAG cost, comparable quality",
+    color: "#06D6A0", accent: "#118AB2", icon: "◎",
+    summary: "The most practically important advance from Microsoft: it makes graph-based RAG economically viable for most use cases. The key insight is that pre-generating LLM community summaries at indexing time is expensive and often unnecessary. LazyGraphRAG defers all summarization to query time, only generating summaries for the subgraph relevant to the actual question asked.",
+    strengths: ["Indexing cost = vector RAG", "700x cheaper query cost than GraphRAG", "Works for streaming/one-off data", "Outperforms all methods on local queries"],
+    weaknesses: ["Query latency can be higher", "Not ideal for repeated broad global queries"],
+    steps: [
+      { id: 1, label: "Indexing (cheap!)", desc: "Build graph using only noun-phrase extraction and co-occurrence — NO LLM calls" },
+      { id: 2, label: "Graph Index", desc: "Lightweight graph of terms and their co-occurrence relationships across chunks" },
+      { id: 3, label: "Query Arrives", desc: "User query received" },
+      { id: 4, label: "Relevance Testing", desc: "Candidate subgraphs scored against query with adjustable budget" },
+      { id: 5, label: "On-Demand Summarization", desc: "LLM summarizes ONLY the relevant subgraph, not the whole corpus" },
+      { id: 6, label: "Answer", desc: "Response generated from the freshly-summarized context" },
+    ],
+    diagram: "lazy",
+    insight: "Traditional GraphRAG is like writing a full encyclopedia before anyone asks a question. LazyGraphRAG is like keeping the raw notes and only writing the encyclopedia entry when someone looks it up. The quality is similar, the upfront cost nearly zero.",
+    papers: [
+      { label: "Microsoft Research Blog", url: "https://www.microsoft.com/en-us/research/blog/lazygraphrag-setting-a-new-standard-for-quality-and-cost/" },
+      { label: "GitHub", url: "https://github.com/microsoft/graphrag" },
+    ],
+  },
+  {
+    id: "lightrag", name: "LightRAG", year: "EMNLP 2025",
+    origin: "HKUDS", tagline: "Dual-level indexing with fast incremental updates",
+    color: "#7B2FBE", accent: "#C77DFF", icon: "◈",
+    summary: "LightRAG strips out the expensive community detection hierarchy and replaces it with a dual-level index — one for specific entity queries, one for broad conceptual queries. This makes it much faster to build and update. Crucially, when new documents arrive, only the affected parts of the graph need regenerating, not the whole index.",
+    strengths: ["Fast incremental updates", "Dual-level retrieval", "Open-source LLM support", "Multimodal via RAG-Anything"],
+    weaknesses: ["No community hierarchy", "Weaker on very broad global sensemaking"],
+    steps: [
+      { id: 1, label: "Document Ingestion", desc: "New or updated documents added to the pipeline" },
+      { id: 2, label: "Low-Level Extraction", desc: "LLM extracts specific entities and typed relationships" },
+      { id: 3, label: "High-Level Extraction", desc: "LLM also extracts abstract concepts and themes" },
+      { id: 4, label: "Dual Index", desc: "Low-level graph (entities/relations) + High-level graph (concepts/themes) stored separately" },
+      { id: 5, label: "Query Classification", desc: "Query analyzed to determine if it's specific, broad, or both" },
+      { id: 6, label: "Targeted Retrieval", desc: "Right index queried with vector similarity + graph traversal" },
+      { id: 7, label: "Answer", desc: "LLM generates response from retrieved graph context" },
+    ],
+    diagram: "dual",
+    insight: "The dual-level design mirrors how humans think: you have both specific factual memory ('Einstein was born in 1879') and abstract conceptual memory ('Einstein's work revolutionized physics'). LightRAG maintains both levels explicitly.",
+    papers: [
+      { label: "Paper (arXiv 2410.05779)", url: "https://arxiv.org/abs/2410.05779" },
+      { label: "GitHub", url: "https://github.com/HKUDS/LightRAG" },
+    ],
+  },
+  {
+    id: "hipporag", name: "HippoRAG", year: "NeurIPS 2024",
+    origin: "Ohio State University", tagline: "Neurobiologically inspired cross-document memory",
+    color: "#EF476F", accent: "#FFB703", icon: "⬡",
+    summary: "Perhaps the most conceptually elegant approach. HippoRAG is directly inspired by how the human brain stores and retrieves memories. The hippocampus acts as a sparse index of associations, while the neocortex stores the actual representations. HippoRAG replicates this computationally using knowledge graphs and Personalized PageRank.",
+    strengths: ["Excellent multi-hop retrieval", "Cross-document knowledge integration", "Very low indexing cost", "Biologically plausible"],
+    weaknesses: ["Entity-centric (may miss context)", "PageRank disambiguation errors", "Not ideal for global summarization"],
+    steps: [
+      { id: 1, label: "Documents (Neocortex)", desc: "Raw text passages stored as dense embeddings" },
+      { id: 2, label: "Open IE Extraction", desc: "LLM extracts (subject, predicate, object) triples from each passage" },
+      { id: 3, label: "Hippocampal Index (KG)", desc: "Triples form a schemaless knowledge graph — sparse associations" },
+      { id: 4, label: "Query → Seed Nodes", desc: "Query terms matched to nodes in the KG via NER + embedding similarity" },
+      { id: 5, label: "Personalized PageRank", desc: "PPR propagates relevance outward from seed nodes through the graph" },
+      { id: 6, label: "Top Passages", desc: "Passages linked to high-PPR nodes retrieved" },
+      { id: 7, label: "Answer Generation", desc: "LLM generates answer from retrieved cross-document context" },
+    ],
+    diagram: "brain",
+    insight: "Personalized PageRank is the key mechanism. Standard PageRank ranks nodes by global importance. Personalized PPR ranks them by relevance to a specific seed set — your query terms. It's like asking: if I start at these nodes and take random walks, which nodes do I visit most?",
+    papers: [
+      { label: "Paper (arXiv 2405.14831)", url: "https://arxiv.org/abs/2405.14831" },
+      { label: "GitHub", url: "https://github.com/OSU-NLP-Group/HippoRAG" },
+    ],
+  },
+  {
+    id: "raptor", name: "RAPTOR", year: "2024",
+    origin: "Stanford", tagline: "Recursive tree summarization for multi-scale retrieval",
+    color: "#2EC4B6", accent: "#CBF3F0", icon: "△",
+    summary: "RAPTOR takes a fundamentally different structural approach: instead of an entity-relationship graph, it builds a tree. Leaf nodes are raw text chunks. Moving up the tree, semantically similar chunks are clustered and summarized. The result is a multi-level tree where every level offers a different granularity of abstraction.",
+    strengths: ["No entity extraction needed", "Coarse-to-fine retrieval", "Good for narrative/thematic queries", "Cheaper than full GraphRAG"],
+    weaknesses: ["Loses explicit entity relationships", "Tree is static — hard to update", "Less precise on specific fact retrieval"],
+    steps: [
+      { id: 1, label: "Raw Chunks (Leaves)", desc: "Documents split into text chunks — leaf nodes of the tree" },
+      { id: 2, label: "Embedding", desc: "Each chunk embedded into vector space" },
+      { id: 3, label: "Clustering (Level 1)", desc: "Semantically similar chunks clustered using Gaussian Mixture Models" },
+      { id: 4, label: "Summarization (Level 1)", desc: "LLM writes a summary of each cluster — these become Level 1 nodes" },
+      { id: 5, label: "Re-Embed & Re-Cluster", desc: "Level 1 summaries embedded and clustered again" },
+      { id: 6, label: "Summarization (Level N)", desc: "Process repeated until a single root summary covers the whole corpus" },
+      { id: 7, label: "Query: Tree Traversal", desc: "Query matched at the right level — broad queries match high-level summaries, specific queries match leaves" },
+    ],
+    diagram: "tree",
+    insight: "RAPTOR is hierarchical summarization made retrievable. It's like having a book with chapters, sections, paragraphs, and sentences — each level gives a different zoom level. The hierarchy is built automatically from any corpus using clustering, not manual structure.",
+    papers: [
+      { label: "Paper (arXiv 2401.18059)", url: "https://arxiv.org/abs/2401.18059" },
+      { label: "GitHub", url: "https://github.com/parthsarthi03/raptor" },
+    ],
+  },
+  {
+    id: "gfmrag", name: "GFM-RAG", year: "NeurIPS 2025",
+    origin: "Monash University", tagline: "A graph neural network trained to be the retriever",
+    color: "#FB8500", accent: "#FFB703", icon: "⬟",
+    summary: "GFM-RAG's breakthrough is training a dedicated Graph Neural Network (GNN) to BE the retriever. The GNN learns structural patterns across many knowledge graphs and generalizes to new, unseen graphs without fine-tuning. This decouples graph reasoning from the expensive LLM, making multi-hop retrieval faster and structurally more accurate.",
+    strengths: ["Single-pass multi-hop retrieval", "Generalizes to unseen graphs", "Structurally accurate", "Much faster than iterative LLM approaches"],
+    weaknesses: ["Requires pre-training", "8M parameter model overhead", "Less interpretable than LLM-based traversal"],
+    steps: [
+      { id: 1, label: "Universal Graph Index", desc: "KG, document graph, or hierarchical graph converted to a standardized format" },
+      { id: 2, label: "GNN Pre-training", desc: "GNN trained across diverse knowledge graphs to learn relational reasoning patterns" },
+      { id: 3, label: "Query Encoding", desc: "User query embedded as a vector query representation" },
+      { id: 4, label: "GNN Reasoning", desc: "GNN performs multi-hop graph traversal in a single forward pass — no iterative LLM calls" },
+      { id: 5, label: "Node Scoring", desc: "Each node in the graph scored for relevance to the query by the GNN" },
+      { id: 6, label: "Subgraph Retrieval", desc: "Top-K nodes and their neighbourhoods retrieved as context" },
+      { id: 7, label: "LLM Generation", desc: "LLM takes the retrieved subgraph context and generates the final answer" },
+    ],
+    diagram: "neural",
+    insight: "In all other systems, the LLM both thinks AND navigates the graph. GFM-RAG separates these: a lean, fast GNN does the navigation (trained for exactly this), and the LLM only does the thinking. The GNN is like a specialized GPS — very good at finding the path.",
+    papers: [
+      { label: "Paper (arXiv 2502.01113)", url: "https://arxiv.org/abs/2502.01113" },
+      { label: "GitHub", url: "https://github.com/RManLuo/gfm-rag" },
+    ],
+  },
+  {
+    id: "pathrag", name: "PathRAG", year: "2025",
+    origin: "Research Community", tagline: "Relational path pruning for clean evidence chains",
+    color: "#8338EC", accent: "#FF006E", icon: "→",
+    summary: "When you retrieve a subgraph neighbourhood around query-related entities, you often get a lot of irrelevant nodes. PathRAG solves this by pruning: instead of retrieving full neighbourhoods, it extracts only the specific relational paths between query entities that lead toward the answer.",
+    strengths: ["Cleaner context for LLM", "Less hallucination from irrelevant nodes", "Better on compositional multi-hop queries"],
+    weaknesses: ["Path extraction can miss non-obvious connections", "Graph must have clear entity nodes"],
+    steps: [
+      { id: 1, label: "Query Analysis", desc: "Entities and concepts in the query identified" },
+      { id: 2, label: "Anchor Node Selection", desc: "Query entities matched to nodes in the knowledge graph" },
+      { id: 3, label: "Path Enumeration", desc: "All paths between anchor nodes up to K hops enumerated" },
+      { id: 4, label: "Path Scoring", desc: "Paths scored by relevance using flow-based resource propagation with decay" },
+      { id: 5, label: "Pruning", desc: "Low-scoring paths discarded — only the most relevant relational chains kept" },
+      { id: 6, label: "Chain Formation", desc: "Top paths serialized as structured evidence chains" },
+      { id: 7, label: "Answer", desc: "LLM reasons over the clean evidence chains to produce a precise answer" },
+    ],
+    diagram: "path",
+    insight: "Consider the question 'Who founded the company that acquired NeoChip?' Neighbourhood retrieval returns hundreds of entities. PathRAG extracts the exact chain: NeoChip → acquired_by → Quantum Systems → founded_by → [person]. The LLM only sees this clean chain.",
+    papers: [
+      { label: "Paper (arXiv 2502.14902)", url: "https://arxiv.org/abs/2502.14902" },
+      { label: "GitHub", url: "https://github.com/BUPT-GAMMA/PathRAG" },
+    ],
+  },
+  {
+    id: "tgrag", name: "Temporal GraphRAG (TG-RAG)", year: "2025",
+    origin: "HKUST", tagline: "Time-aware knowledge with evolving graph structures",
+    color: "#219EBC", accent: "#8ECAE6", icon: "⊕",
+    summary: "All previous systems treat knowledge as static. But the real world changes: companies merge, laws change, people change roles. TG-RAG explicitly models the temporal dimension by representing facts as timestamped edges. The same fact at different times becomes distinct edges, and the system learns to retrieve within the right temporal window for each query.",
+    strengths: ["Handles time-sensitive queries", "Avoids temporal ambiguity", "Incremental updates without full re-indexing", "Hierarchical time summaries"],
+    weaknesses: ["More complex graph structure", "Harder to build and maintain", "Temporal query parsing adds latency"],
+    steps: [
+      { id: 1, label: "Document Ingestion + Timestamps", desc: "Documents processed with their publication/event dates" },
+      { id: 2, label: "Temporal KG", desc: "Facts extracted as (subject, predicate, object, timestamp) — same fact at two times = two edges" },
+      { id: 3, label: "Time Hierarchy Graph", desc: "Separate hierarchy: day → month → year → decade, with summaries per time node" },
+      { id: 4, label: "Temporal Query Decomposition", desc: "Query analyzed to extract temporal constraints: 'current', 'in 2023', 'before X'" },
+      { id: 5, label: "Time-Scoped Subgraph", desc: "Graph traversal restricted to edges within the query's temporal window" },
+      { id: 6, label: "Hierarchical Time Context", desc: "Relevant time-level summaries added for broader trend context" },
+      { id: 7, label: "Temporally-Grounded Answer", desc: "LLM generates answer explicitly anchored in the correct time period" },
+    ],
+    diagram: "temporal",
+    insight: "If you ask 'Who is the CEO of Company X?' and the CEO changed in 2024, a static graph might give you the old answer with full confidence. Timestamped edges mean the graph can answer 'CEO as of 2023' and 'CEO as of 2025' as separate, unambiguous queries.",
+    papers: [
+      { label: "Paper (arXiv 2510.13590)", url: "https://arxiv.org/abs/2510.13590" },
+      { label: "T-GRAG variant (arXiv 2508.01680)", url: "https://arxiv.org/abs/2508.01680" },
+    ],
+  },
+];
+
+// ─────────────────────────────────────────────
+//  SVG DIAGRAMS
+// ─────────────────────────────────────────────
+const DiagramPipeline = ({ color }) => (
+  <svg viewBox="0 0 700 100" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    {["Docs","Chunks","Entities","KG","Communities","Summaries","Answer"].map((label, i) => {
+      const x = 20 + i * 95;
+      return (<g key={i}>{i > 0 && <line x1={x-20} y1={50} x2={x} y2={50} stroke={color} strokeWidth={2} markerEnd="url(#arr)" />}<rect x={x} y={30} width={75} height={40} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={x+37} y={54} textAnchor="middle" fill={color} fontSize={9} fontWeight="600">{label}</text></g>);
+    })}
+  </svg>
+);
+const DiagramFork = ({ color }) => (
+  <svg viewBox="0 0 420 160" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id={`af`} markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    {[["Query",20,70],["Global Scan",120,70]].map(([t,x,y]) => (<g key={t}><rect x={x} y={y-17} width={85} height={34} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={x+42} y={y+5} textAnchor="middle" fill={color} fontSize={10} fontWeight="600">{t}</text></g>))}
+    <line x1={105} y1={70} x2={120} y2={70} stroke={color} strokeWidth={2} markerEnd="url(#af)" />
+    <line x1={205} y1={55} x2={205} y2={30} stroke={color} strokeWidth={2} /><line x1={205} y1={85} x2={205} y2={110} stroke={color} strokeWidth={2} />
+    {[["Initial Answer",220,30],["Follow-up Qs",220,110]].map(([t,x,y]) => (<g key={t}><line x1={205} y1={y} x2={x} y2={y} stroke={color} strokeWidth={2} markerEnd="url(#af)" /><rect x={x} y={y-17} width={100} height={34} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={x+50} y={y+5} textAnchor="middle" fill={color} fontSize={10} fontWeight="600">{t}</text></g>))}
+    <line x1={320} y1={30} x2={355} y2={30} stroke={color} strokeWidth={2} /><line x1={320} y1={110} x2={355} y2={110} stroke={color} strokeWidth={2} /><line x1={355} y1={30} x2={355} y2={70} stroke={color} strokeWidth={2} /><line x1={355} y1={110} x2={355} y2={70} stroke={color} strokeWidth={2} /><line x1={355} y1={70} x2={375} y2={70} stroke={color} strokeWidth={2} markerEnd="url(#af)" />
+    <rect x={375} y={53} width={40} height={34} rx={6} fill={`${color}44`} stroke={color} strokeWidth={2} /><text x={395} y={74} textAnchor="middle" fill={color} fontSize={10} fontWeight="700">Final</text>
+  </svg>
+);
+const DiagramTree = ({ color }) => (
+  <svg viewBox="0 0 380 200" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="at" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    <rect x={140} y={20} width={100} height={30} rx={6} fill={`${color}44`} stroke={color} strokeWidth={2} /><text x={190} y={39} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">Global Summary</text>
+    {[[90,75],[290,75]].map(([x,y],i) => (<g key={i}><line x1={190} y1={50} x2={x} y2={y} stroke={color} strokeWidth={1.5} markerEnd="url(#at)" /><rect x={x-45} y={y} width={90} height={28} rx={5} fill={`${color}33`} stroke={color} strokeWidth={1.5} /><text x={x} y={y+18} textAnchor="middle" fill={color} fontSize={9} fontWeight="600">{i===0?"Cluster A":"Cluster B"} Summary</text></g>))}
+    {[[30,135],[90,135],[155,135],[220,135],[290,135],[350,135]].map(([x,y],i) => { const parent=i<3?90:290; return (<g key={i}><line x1={parent} y1={103} x2={x} y2={y} stroke={color} strokeWidth={1} opacity={0.6} /><rect x={x-24} y={y} width={48} height={24} rx={4} fill={`${color}22`} stroke={color} strokeWidth={1} /><text x={x} y={y+15} textAnchor="middle" fill={color} fontSize={8}>Chunk {i+1}</text></g>); })}
+  </svg>
+);
+const DiagramBrain = ({ color }) => (
+  <svg viewBox="0 0 420 160" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="ab" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    {[[20,25],[70,25],[120,25]].map(([x,y],i) => (<g key={i}><rect x={x} y={y} width={45} height={30} rx={4} fill={`${color}22`} stroke={color} strokeWidth={1.2} /><text x={x+22} y={y+18} textAnchor="middle" fill={color} fontSize={8}>Doc {i+1}</text></g>))}
+    {[[20,90],[70,90],[120,90]].map(([x,y],i) => (<g key={i}><line x1={x+22} y1={55} x2={x+22} y2={y} stroke={color} strokeWidth={1} strokeDasharray="3,2" markerEnd="url(#ab)" /><circle cx={x+22} cy={y+15} r={16} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={x+22} y={y+19} textAnchor="middle" fill={color} fontSize={8}>E{i+1}</text></g>))}
+    <line x1={42} y1={105} x2={70} y2={105} stroke={color} strokeWidth={1.2} /><line x1={92} y1={105} x2={120} y2={105} stroke={color} strokeWidth={1.2} />
+    <rect x={200} y={60} width={100} height={30} rx={6} fill={`${color}33`} stroke={color} strokeWidth={2} /><text x={250} y={79} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">PageRank Spread</text>
+    {[[170,105],[250,125],[330,105]].map(([x,y],i) => (<g key={i}><line x1={250} y1={90} x2={x} y2={y} stroke={color} strokeWidth={1.5} markerEnd="url(#ab)" /><rect x={x-28} y={y} width={56} height={24} rx={4} fill={`${color}22`} stroke={color} strokeWidth={1} /><text x={x} y={y+15} textAnchor="middle" fill={color} fontSize={8}>{["Passage A","Passage B","Passage C"][i]}</text></g>))}
+    <line x1={170} y1={75} x2={200} y2={75} stroke={color} strokeWidth={2} strokeDasharray="4,2" markerEnd="url(#ab)" /><text x={158} y={72} textAnchor="end" fill={color} fontSize={8}>Seeds</text>
+  </svg>
+);
+const DiagramDual = ({ color }) => (
+  <svg viewBox="0 0 400 140" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="ad" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    <rect x={10} y={50} width={80} height={40} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={50} y={74} textAnchor="middle" fill={color} fontSize={10} fontWeight="600">Documents</text>
+    <line x1={90} y1={65} x2={110} y2={45} stroke={color} strokeWidth={1.5} markerEnd="url(#ad)" /><line x1={90} y1={75} x2={110} y2={95} stroke={color} strokeWidth={1.5} markerEnd="url(#ad)" />
+    <rect x={110} y={28} width={100} height={34} rx={6} fill={`${color}33`} stroke={color} strokeWidth={1.5} /><text x={160} y={49} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">Low-Level</text><text x={160} y={60} textAnchor="middle" fill={color} fontSize={8} opacity={0.8}>Entities + Relations</text>
+    <rect x={110} y={78} width={100} height={34} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={160} y={99} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">High-Level</text><text x={160} y={110} textAnchor="middle" fill={color} fontSize={8} opacity={0.8}>Concepts + Themes</text>
+    <rect x={235} y={50} width={80} height={40} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={275} y={71} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">Query</text><text x={275} y={82} textAnchor="middle" fill={color} fontSize={8}>Classifier</text>
+    <line x1={210} y1={45} x2={235} y2={65} stroke={color} strokeWidth={1.5} markerEnd="url(#ad)" /><line x1={210} y1={95} x2={235} y2={75} stroke={color} strokeWidth={1.5} markerEnd="url(#ad)" />
+    <line x1={315} y1={70} x2={355} y2={70} stroke={color} strokeWidth={2} markerEnd="url(#ad)" /><rect x={355} y={53} width={40} height={34} rx={6} fill={`${color}44`} stroke={color} strokeWidth={2} /><text x={375} y={73} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">Answer</text>
+  </svg>
+);
+const DiagramLazy = ({ color }) => (
+  <svg viewBox="0 0 440 120" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="al" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    <rect x={5} y={20} width={120} height={80} rx={8} fill={`${color}11`} stroke={color} strokeWidth={1} strokeDasharray="4,3" />
+    <rect x={15} y={45} width={100} height={30} rx={5} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={65} y={63} textAnchor="middle" fill={color} fontSize={9}>Noun-Phrase Graph</text><text x={65} y={74} textAnchor="middle" fill={color} fontSize={7} opacity={0.7}>(no LLM calls!)</text>
+    <rect x={165} y={40} width={80} height={40} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={205} y={63} textAnchor="middle" fill={color} fontSize={9} fontWeight="600">Query</text>
+    <line x1={125} y1={60} x2={165} y2={60} stroke={color} strokeWidth={1.5} markerEnd="url(#al)" />
+    <rect x={280} y={25} width={100} height={30} rx={6} fill={`${color}33`} stroke={color} strokeWidth={1.5} /><text x={330} y={45} textAnchor="middle" fill={color} fontSize={8} fontWeight="700">Relevance Test</text>
+    <rect x={280} y={75} width={100} height={30} rx={6} fill={`${color}33`} stroke={color} strokeWidth={1.5} /><text x={330} y={94} textAnchor="middle" fill={color} fontSize={8} fontWeight="700">On-Demand Summary</text>
+    <line x1={245} y1={60} x2={265} y2={40} stroke={color} strokeWidth={1.5} markerEnd="url(#al)" /><line x1={245} y1={60} x2={265} y2={90} stroke={color} strokeWidth={1.5} markerEnd="url(#al)" /><line x1={205} y1={80} x2={245} y2={80} stroke={color} strokeWidth={1} /><line x1={245} y1={60} x2={245} y2={80} stroke={color} strokeWidth={1} />
+    <line x1={380} y1={40} x2={410} y2={60} stroke={color} strokeWidth={1.5} /><line x1={380} y1={90} x2={410} y2={60} stroke={color} strokeWidth={1.5} /><circle cx={420} cy={60} r={10} fill={`${color}44`} stroke={color} strokeWidth={2} /><text x={420} y={64} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">✓</text>
+  </svg>
+);
+const DiagramNeural = ({ color }) => (
+  <svg viewBox="0 0 440 130" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="an" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    <rect x={10} y={45} width={70} height={40} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={45} y={66} textAnchor="middle" fill={color} fontSize={9} fontWeight="600">Query</text>
+    <rect x={10} y={95} width={70} height={30} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={45} y={114} textAnchor="middle" fill={color} fontSize={8}>KG / Graph</text>
+    {[50,70,90,110].map((y,i) => (<g key={i}><line x1={80} y1={y>80?110:65} x2={120} y2={y} stroke={color} strokeWidth={1} opacity={0.5} /><circle cx={130} cy={y} r={7} fill={`${color}33`} stroke={color} strokeWidth={1.5} /></g>))}
+    {[60,80,100].map((y,i) => (<g key={i}>{[50,70,90,110].map((py,j) => (<line key={j} x1={137} y1={py} x2={175} y2={y} stroke={color} strokeWidth={0.5} opacity={0.3} />))}<circle cx={185} cy={y} r={8} fill={`${color}44`} stroke={color} strokeWidth={1.5} /></g>))}
+    {[65,95].map((y,i) => (<g key={i}>{[60,80,100].map((py,j) => (<line key={j} x1={193} y1={py} x2={225} y2={y} stroke={color} strokeWidth={0.7} opacity={0.4} />))}<circle cx={235} cy={y} r={10} fill={`${color}55`} stroke={color} strokeWidth={2} /><text x={235} y={y+4} textAnchor="middle" fill={color} fontSize={8} fontWeight="700">{i===0?"↑":"↓"}</text></g>))}
+    <line x1={245} y1={80} x2={280} y2={80} stroke={color} strokeWidth={2} markerEnd="url(#an)" /><rect x={280} y={50} width={80} height={60} rx={6} fill={`${color}22`} stroke={color} strokeWidth={1.5} /><text x={320} y={78} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">Top-K</text><text x={320} y={92} textAnchor="middle" fill={color} fontSize={8}>Subgraph</text>
+    <line x1={360} y1={80} x2={390} y2={80} stroke={color} strokeWidth={2} markerEnd="url(#an)" /><rect x={390} y={63} width={45} height={34} rx={6} fill={`${color}44`} stroke={color} strokeWidth={2} /><text x={412} y={83} textAnchor="middle" fill={color} fontSize={8} fontWeight="700">LLM</text>
+  </svg>
+);
+const DiagramPath = ({ color }) => (
+  <svg viewBox="0 0 440 120" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="ap" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    {[[30,60],[130,30],[130,90],[230,60],[330,30],[330,90],[400,60]].map(([x,y],i) => (<g key={i}><circle cx={x} cy={y} r={18} fill={i===0||i===3||i===6?`${color}44`:`${color}15`} stroke={i===0||i===3||i===6?color:`${color}55`} strokeWidth={i===0||i===3||i===6?2:1} /><text x={x} y={y+4} textAnchor="middle" fill={color} fontSize={8} fontWeight={i===0||i===3||i===6?"700":"400"} opacity={i===0||i===3||i===6?1:0.5}>{["A","B","C","D","E","F","G"][i]}</text></g>))}
+    <line x1={48} y1={55} x2={112} y2={38} stroke={color} strokeWidth={2} markerEnd="url(#ap)" />
+    <line x1={148} y1={38} x2={212} y2={55} stroke={color} strokeWidth={2} markerEnd="url(#ap)" />
+    <line x1={248} y1={55} x2={312} y2={38} stroke={color} strokeWidth={1.5} strokeDasharray="4,3" opacity={0.4} />
+    <line x1={248} y1={65} x2={312} y2={80} stroke={color} strokeWidth={1.5} strokeDasharray="4,3" opacity={0.4} />
+    <line x1={348} y1={38} x2={382} y2={52} stroke={color} strokeWidth={2} markerEnd="url(#ap)" />
+    <line x1={48} y1={65} x2={112} y2={82} stroke={color} strokeWidth={1} strokeDasharray="3,3" opacity={0.3} />
+    <text x={80} y={115} textAnchor="middle" fill={color} fontSize={8} fontWeight="700">A → B → D → G (kept)</text>
+    <text x={310} y={115} textAnchor="middle" fill={color} fontSize={8} opacity={0.4}>Pruned paths</text>
+  </svg>
+);
+const DiagramTemporal = ({ color }) => (
+  <svg viewBox="0 0 460 130" style={{ width: "100%", height: "auto" }}>
+    <defs><marker id="atm" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill={color} /></marker></defs>
+    <line x1={20} y1={65} x2={440} y2={65} stroke={color} strokeWidth={1.5} opacity={0.3} />
+    {[["2022",60],["2023",150],["2024",240],["2025",330]].map(([yr,x]) => (<g key={yr}><line x1={x} y1={58} x2={x} y2={72} stroke={color} strokeWidth={2} /><text x={x} y={85} textAnchor="middle" fill={color} fontSize={9} fontWeight="600">{yr}</text></g>))}
+    {[[75,40,"CEO=Alice",1],[165,40,"CEO=Bob",1],[255,40,"CEO=Carol",1],[120,100,"Corp Merge",0.6],[300,100,"IPO",0.6]].map(([x,y,label,op],i) => (<g key={i}><line x1={x} y1={65} x2={x} y2={y+12} stroke={color} strokeWidth={1.5} opacity={op} /><rect x={x-32} y={y-10} width={64} height={22} rx={4} fill={`${color}22`} stroke={color} strokeWidth={1.2} opacity={op} /><text x={x} y={y+5} textAnchor="middle" fill={color} fontSize={8} fontWeight="600" opacity={op}>{label}</text></g>))}
+    <rect x={355} y={20} width={90} height={30} rx={6} fill={`${color}33`} stroke={color} strokeWidth={2} /><text x={400} y={37} textAnchor="middle" fill={color} fontSize={9} fontWeight="700">Query: 2024</text>
+    <line x1={355} y1={35} x2={255} y2={50} stroke={color} strokeWidth={1.5} strokeDasharray="4,2" markerEnd="url(#atm)" />
+  </svg>
+);
+
+const diagramComponents = {
+  pipeline: DiagramPipeline, fork: DiagramFork, tree: DiagramTree,
+  brain: DiagramBrain, dual: DiagramDual, lazy: DiagramLazy,
+  neural: DiagramNeural, path: DiagramPath, temporal: DiagramTemporal,
+};
+
+// ─────────────────────────────────────────────
+//  CODE PANEL
+// ─────────────────────────────────────────────
+const CODE_TABS = ["embedding", "graph", "retrieval"];
+const CODE_LABELS = {
+  embedding: "Embedding Creation",
+  graph: "Graph / Index Construction",
+  retrieval: "Semantic Retrieval",
+};
+
+function CodePanel({ sysId, color }) {
+  const [tab, setTab] = useState("embedding");
+  const code = pseudoCode[sysId]?.[tab] ?? "# Code coming soon";
+
+  // Very simple syntax highlighting
+  const highlight = (src) => {
+    return src.split("\n").map((line, i) => {
+      const isComment = line.trim().startsWith("#");
+      const isKeyword = /^(def |for |if |elif |else|return |while |class |import |from |and |or |not |in )/.test(line.trimStart());
+      const color_ = isComment ? "#6a9955" : isKeyword ? "#c586c0" : "#d4d4d4";
+      const indent = line.match(/^(\s*)/)[1].length;
+      return (
+        <div key={i} style={{ color: color_, paddingLeft: indent * 8, lineHeight: 1.6, whiteSpace: "pre" }}>
+          {line.trimStart().split(/(\b(?:def|for|if|elif|else|return|while|class|import|from|True|False|None|and|or|not|in)\b|"[^"]*"|'[^']*'|\b\d+\.?\d*\b)/g).map((part, j) => {
+            if (/^"[^"]*"$|^'[^']*'$/.test(part)) return <span key={j} style={{ color: "#ce9178" }}>{part}</span>;
+            if (/^\b(?:def|for|if|elif|else|return|while|class|import|from|True|False|None|and|or|not|in)\b$/.test(part)) return <span key={j} style={{ color: "#c586c0" }}>{part}</span>;
+            if (/^\b\d+\.?\d*\b$/.test(part)) return <span key={j} style={{ color: "#b5cea8" }}>{part}</span>;
+            return <span key={j}>{part}</span>;
+          })}
+        </div>
+      );
+    });
+  };
+
+  return (
+    <div style={{ background: "#0d1117", border: `1px solid ${color}22`, borderRadius: 10, overflow: "hidden", marginBottom: 28 }}>
+      {/* Tab bar */}
+      <div style={{ display: "flex", borderBottom: `1px solid ${color}22`, background: "#161b22" }}>
+        {CODE_TABS.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            padding: "10px 20px", border: "none", background: "transparent",
+            borderBottom: t === tab ? `2px solid ${color}` : "2px solid transparent",
+            color: t === tab ? color : "#555",
+            fontSize: 11, fontWeight: 700, cursor: "pointer",
+            fontFamily: "'JetBrains Mono', monospace",
+            letterSpacing: 0.3, transition: "all 0.15s",
+          }}>
+            {CODE_LABELS[t]}
+          </button>
+        ))}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", paddingRight: 16, gap: 6 }}>
+          <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff5f57" }} />
+          <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#febc2e" }} />
+          <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#28c840" }} />
+        </div>
+      </div>
+      {/* Code area */}
+      <div style={{
+        padding: "20px 24px",
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 11.5,
+        lineHeight: 1.7,
+        overflowX: "auto",
+        maxHeight: 440,
+        overflowY: "auto",
+        background: "#0d1117",
+      }}>
+        {highlight(code)}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  BEFORE GRAPHRAG PAGE
+// ─────────────────────────────────────────────
+function BeforeGraphRAGPage() {
+  const C = "#a78bfa";
+  const sections = [
+    {
+      era: "Pre-2017: Hand-crafted Ontologies",
+      color: "#64748b",
+      icon: "◻",
+      what: "Knowledge was represented as formal ontologies — explicit, human-authored schemas defining every concept, property, and logical relationship in a domain. The two dominant standards were OWL (Web Ontology Language) for defining class hierarchies and axioms, and RDF (Resource Description Framework) for storing facts as (subject, predicate, object) triples. Tools like Protégé let domain experts build these graphs visually.",
+      how: "Retrieval meant writing SPARQL queries — a structured query language for RDF. When an LLM wasn't involved at all, a human analyst would manually compose a SPARQL query to traverse the ontology: \"Find all Contracts where Party is ACME Inc. and Clause type is Indemnity and EffectiveDate > 2022.\" The graph returned precise, logically consistent answers — but only if the question fit the schema exactly.",
+      limits: "The fatal flaw was brittleness. If a user asked something the ontology designer hadn't anticipated, the system returned nothing. Building and maintaining ontologies required rare, expensive ontology engineers. Scaling to new domains meant months of manual schema design. And the systems had zero ability to handle natural language questions directly.",
+      code: `# Classic SPARQL query over an OWL/RDF knowledge base
+# This is how retrieval worked before any LLM involvement.
+
+PREFIX contract: <http://example.org/contract#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT ?clause ?text ?party
+WHERE {
+  # Traverse the ontology via typed relations
+  ?contract  a                   contract:Agreement ;
+             contract:hasParty   ?party ;
+             contract:hasClause  ?clause .
+
+  ?clause    a                   contract:IndemnityClause ;
+             contract:text       ?text ;
+             contract:effectiveDate ?date .
+
+  # Filter by logical predicate
+  FILTER(?date > "2022-01-01"^^xsd:date)
+
+  # Only clauses in active contracts
+  ?contract contract:status "ACTIVE" .
+}
+# Problem: this query only works if every term
+# (hasParty, IndemnityClause, effectiveDate) was
+# manually defined in the ontology schema.
+# One missing concept = zero results.`,
+      diagram: "ontology",
+    },
+    {
+      era: "2017–2022: Schema-less KG + Keyword/SPARQL Hybrid",
+      color: "#7c3aed",
+      icon: "◈",
+      what: "As neural NLP matured, researchers began constructing knowledge graphs automatically from text using information extraction pipelines (Stanford OpenIE, spaCy, REBEL). These were often schema-less — no predefined ontology — just (subject, relation, object) triples extracted by NLP models. Large curated KGs like Wikidata, Freebase, and UMLS (medical) became public infrastructure. Neo4j (property graphs) became the dominant store.",
+      how: "Retrieval evolved to \"entity linking\": given a user's natural language question, first identify the entities it mentions (NER), link them to nodes in the KG via string matching or embeddings, then traverse the graph via predefined relation paths. This was the basis of systems like KGQA (Knowledge Graph Question Answering) — used by Google's Knowledge Panel, Amazon Alexa, and early IBM Watson.",
+      limits: "Entity linking was fragile — \"Apple\" could mean the company, the fruit, or a person's nickname. Traversal was still rule-based and couldn't handle questions that required reasoning across multiple hops or inferring implicit relationships. And these systems were entirely separate from language models — the KG returned structured data, which was then formatted into text by a hand-written template, not an LLM.",
+      code: `# KGQA era: entity linking + graph traversal, no LLM
+# Used in Alexa, early Watson, Google Knowledge Panel
+
+def answer_kgqa(question: str, kg: Graph):
+
+    # Step 1: Named Entity Recognition
+    # "What movies did Christopher Nolan direct after 2010?"
+    entities = ner_model.extract(question)
+    # → ["Christopher Nolan"]
+    relations = relation_classifier.classify(question)
+    # → ["directed", "after:2010"]
+
+    # Step 2: Entity Linking — match to KG nodes
+    # Uses string similarity + type constraints
+    linked = []
+    for ent in entities:
+        candidates = kg.search_nodes(ent, top_k=5)
+        # Disambiguate by context type
+        best = disambiguate(candidates, question_context)
+        linked.append(best)
+    # → Node("Christopher_Nolan", type="Person")
+
+    # Step 3: Rule-based graph traversal
+    # Pre-written traversal template for "directed after X"
+    results = kg.query("""
+        MATCH (p:Person {name: $name})
+              -[:DIRECTED]->(m:Movie)
+        WHERE m.year > $year
+        RETURN m.title, m.year
+        ORDER BY m.year
+    """, name="Christopher Nolan", year=2010)
+    # → [("Inception", 2010), ("Interstellar", 2014), ...]
+
+    # Step 4: Template-based answer (NO LLM)
+    return f"Christopher Nolan directed: {format(results)}"
+    # Hard-coded template — not flexible at all`,
+      diagram: "kgqa",
+    },
+    {
+      era: "2022–2024: KG-augmented LLMs (Pre-GraphRAG)",
+      color: "#2563eb",
+      icon: "⬡",
+      what: "The arrival of powerful LLMs (GPT-3, then GPT-4) created a new paradigm: use the KG for structured retrieval, then pass results to an LLM for natural language generation. Systems like KG-GPT, Think-on-Graph, and KAPING augmented LLM prompts with KG subgraphs. Crucially, these systems still required a pre-existing, structured knowledge graph — they just replaced the template-based answer step with an LLM call.",
+      how: "Retrieval was still entity-linking + graph traversal, but now the traversal output (a subgraph or list of triples) was serialized as text and injected into an LLM prompt. The LLM's job was to reason over those structured facts and produce a fluent answer. This dramatically improved answer quality and flexibility — but the KG construction step still required either manual curation or supervised NLP models.",
+      limits: "The fundamental bottleneck remained: building the knowledge graph was a separate, expensive, offline engineering process. If your document wasn't already in the KG, you couldn't query it. There was no way to take an arbitrary text corpus and ask global questions about it. That was the gap Microsoft's GraphRAG filled in April 2024 — by making LLMs responsible for building the KG, not just querying it.",
+      code: `# KG-augmented LLM era (2022-2024): Think-on-Graph style
+# KG provides structured facts; LLM reasons over them.
+# Still requires a pre-built KG (Wikidata, domain KG etc.)
+
+def think_on_graph(question, kg, llm, max_hops=3):
+
+    # Step 1: Identify topic entities in the question
+    topic_entities = llm.extract_entities(
+        f"Extract named entities from: '{question}'"
+    )
+    # LLM now does NER instead of rule-based model
+
+    # Step 2: Beam search over KG from topic entities
+    # At each hop, LLM scores which relations to follow
+    frontier = set(topic_entities)
+    reasoning_paths = []
+
+    for hop in range(max_hops):
+        candidates = []
+        for entity in frontier:
+            # Get all 1-hop neighbours from the KG
+            neighbours = kg.get_neighbours(entity)
+            # [(relation, neighbour_entity, score), ...]
+            candidates.extend(neighbours)
+
+        # LLM SCORES each candidate relation/entity pair:
+        # "Given the question, which of these paths is
+        #  most likely to lead to the answer?"
+        scored = llm.score_candidates(question, candidates)
+        top_k  = [c for c, s in scored if s > 0.5][:5]
+
+        for rel, ent in top_k:
+            reasoning_paths.append(
+                f"{entity} --[{rel}]--> {ent}"
+            )
+        frontier = {ent for _, ent in top_k}
+
+    # Step 3: LLM generates answer from collected paths
+    context = "\n".join(reasoning_paths)
+    return llm.answer(f"""
+        Question: {question}
+        Knowledge Graph paths found:
+        {context}
+        Answer based on these facts:
+    """)
+    # Better than templates! But KG must already exist.`,
+      diagram: "kgllm",
+    },
+  ];
+
+  const diagrams = {
+    ontology: (
+      <svg viewBox="0 0 500 160" style={{ width: "100%", height: "auto" }}>
+        <defs><marker id="ao" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#a78bfa" /></marker></defs>
+        {/* OWL class hierarchy */}
+        {[["Thing",250,20],["LegalDoc",120,65],["Contract",60,115],["NDA",110,115],["Entity",250,65],["Person",200,115],["Company",290,115],["Clause",380,65],["IndemnityClause",330,115],["LiabilityClause",430,115]].map(([t,x,y]) => (
+          <g key={t}><rect x={x-40} y={y-13} width={80} height={26} rx={4} fill="#1a1030" stroke="#a78bfa" strokeWidth={1.2} /><text x={x} y={y+4} textAnchor="middle" fill="#c4b5fd" fontSize={8} fontWeight="600">{t}</text></g>
+        ))}
+        {[[250,33,120,52],[250,33,250,52],[250,33,380,52],[120,78,60,102],[120,78,110,102],[250,78,200,102],[250,78,290,102],[380,78,330,102],[380,78,430,102]].map(([x1,y1,x2,y2],i) => (
+          <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#7c3aed" strokeWidth={1} markerEnd="url(#ao)" />
+        ))}
+        <text x={250} y={155} textAnchor="middle" fill="#555" fontSize={8}>OWL Class Hierarchy — hand-authored, rigid, complete before any data arrives</text>
+      </svg>
+    ),
+    kgqa: (
+      <svg viewBox="0 0 520 120" style={{ width: "100%", height: "auto" }}>
+        <defs><marker id="ak" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#7c3aed" /></marker></defs>
+        {[["Question",50,60],["NER +\nEntity Link",150,60],["KG\nTraversal",270,60],["Template\nAnswer",390,60]].map(([t,x,y],i) => (
+          <g key={i}>
+            {i>0 && <line x1={i===1?100:i===2?200:320} y1={60} x2={i===1?115:i===2?235:355} y2={60} stroke="#7c3aed" strokeWidth={1.5} markerEnd="url(#ak)" />}
+            <rect x={x-46} y={y-22} width={92} height={44} rx={6} fill="#0f0820" stroke="#7c3aed" strokeWidth={1.5} />
+            <text x={x} y={y} textAnchor="middle" fill="#a78bfa" fontSize={9} fontWeight="700">{t.split("\n")[0]}</text>
+            {t.includes("\n") && <text x={x} y={y+12} textAnchor="middle" fill="#7c3aed" fontSize={8}>{t.split("\n")[1]}</text>}
+          </g>
+        ))}
+        <rect x={220} y={85} width={110} height={22} rx={4} fill="#1a0830" stroke="#7c3aed" strokeWidth={1} />
+        <text x={275} y={100} textAnchor="middle" fill="#7c3aed" fontSize={8}>Wikidata / Neo4j KG</text>
+        <line x1={270} y1={85} x2={270} y2={82} stroke="#7c3aed" strokeWidth={1} />
+        <text x={260} y={115} textAnchor="middle" fill="#555" fontSize={8}>No LLM in the loop — rigid templates, no natural language generation</text>
+      </svg>
+    ),
+    kgllm: (
+      <svg viewBox="0 0 560 130" style={{ width: "100%", height: "auto" }}>
+        <defs><marker id="al2" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#2563eb" /></marker></defs>
+        {[["Question",55,55],["LLM:\nNER + Score",165,55],["Pre-built\nKG Traversal",285,55],["Subgraph\nTriples",390,55],["LLM:\nGenerate",485,55]].map(([t,x,y],i) => (
+          <g key={i}>
+            {i>0 && <line x1={[110,220,340,445][i-1]} y1={55} x2={[125,240,355,460][i-1]} y2={55} stroke="#2563eb" strokeWidth={1.5} markerEnd="url(#al2)" />}
+            <rect x={x-48} y={y-24} width={96} height={48} rx={6} fill={i===1||i===4?"#0a1830":"#080820"} stroke={i===1||i===4?"#3b82f6":"#2563eb"} strokeWidth={i===1||i===4?2:1.2} />
+            <text x={x} y={y-2} textAnchor="middle" fill={i===1||i===4?"#93c5fd":"#6090e0"} fontSize={9} fontWeight={i===1||i===4?"700":"500"}>{t.split("\n")[0]}</text>
+            {t.includes("\n") && <text x={x} y={y+11} textAnchor="middle" fill={i===1||i===4?"#60a5fa":"#4060a0"} fontSize={8}>{t.split("\n")[1]}</text>}
+          </g>
+        ))}
+        <text x={285} y={115} textAnchor="middle" fill="#444" fontSize={8}>KG must already exist — LLM queries it, cannot build it from scratch</text>
+        <rect x={220} y={88} width={130} height={18} rx={3} fill="#050510" stroke="#1e3a5f" strokeWidth={1} />
+        <text x={285} y={100} textAnchor="middle" fill="#1e40af" fontSize={8}>Pre-built Wikidata / Domain KG</text>
+      </svg>
+    ),
+  };
+
+  return (
+    <div style={{ padding: "28px 36px" }}>
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 10, letterSpacing: 3, color: "#555", textTransform: "uppercase", marginBottom: 6 }}>Chapter 0 · Historical Context</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: "#f0f0f8", letterSpacing: -0.5, marginBottom: 10 }}>Before GraphRAG: The Evolution of Knowledge Graph Retrieval</div>
+        <div style={{ fontSize: 13, color: "#888", lineHeight: 1.75, maxWidth: 720 }}>
+          GraphRAG did not emerge from a vacuum. It is the culmination of three decades of research into how to make structured knowledge machine-queryable. Understanding the limitations of each prior generation makes clear exactly what problem GraphRAG solves — and why it was not possible before LLMs.
+        </div>
+      </div>
+
+      {sections.map((s, i) => (
+        <div key={i} style={{ marginBottom: 36, borderLeft: `3px solid ${s.color}`, paddingLeft: 24 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <span style={{ fontSize: 18, color: s.color }}>{s.icon}</span>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#e8e8f0", letterSpacing: -0.3 }}>{s.era}</div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+            {[["What it was", s.what], ["How retrieval worked", s.how], ["Why it failed", s.limits]].map(([title, text]) => (
+              <div key={title} style={{ background: "#0f0f1e", border: `1px solid ${s.color}22`, borderRadius: 8, padding: "12px 14px" }}>
+                <div style={{ fontSize: 9, letterSpacing: 2, color: s.color, textTransform: "uppercase", marginBottom: 8, fontWeight: 700 }}>{title}</div>
+                <div style={{ fontSize: 11, color: "#aaa", lineHeight: 1.7 }}>{text}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: "#080812", border: `1px solid ${s.color}22`, borderRadius: 8, marginBottom: 14, overflow: "hidden" }}>
+            <div style={{ padding: "6px 16px", background: "#0d0d1e", borderBottom: `1px solid ${s.color}18`, fontSize: 9, color: s.color, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase" }}>Code Example</div>
+            <pre style={{ padding: "14px 18px", margin: 0, fontSize: 10.5, color: "#d4d4d4", lineHeight: 1.65, overflowX: "auto", fontFamily: "'JetBrains Mono', monospace", whiteSpace: "pre" }}>
+              {s.code.split("\n").map((line, li) => {
+                const isComment = line.trim().startsWith("#");
+                const isKeyword = /\b(def|for|if|elif|else|return|while|class|SELECT|WHERE|PREFIX|MATCH|FILTER|RETURN|ORDER)\b/.test(line);
+                return (
+                  <div key={li} style={{ color: isComment ? "#5a8f5a" : "#d4d4d4" }}>
+                    {line.split(/("[^"]*"|\b(?:def|for|if|elif|else|return|while|SELECT|WHERE|PREFIX|MATCH|FILTER|RETURN)\b|\b\d+\b)/g).map((part, pi) => {
+                      if (/^"[^"]*"$/.test(part)) return <span key={pi} style={{ color: "#ce9178" }}>{part}</span>;
+                      if (/^\b(?:def|for|if|elif|else|return|while|SELECT|WHERE|PREFIX|MATCH|FILTER|RETURN)\b$/.test(part)) return <span key={pi} style={{ color: "#c586c0" }}>{part}</span>;
+                      if (/^\b\d+\b$/.test(part)) return <span key={pi} style={{ color: "#b5cea8" }}>{part}</span>;
+                      return <span key={pi}>{part}</span>;
+                    })}
+                  </div>
+                );
+              })}
+            </pre>
+          </div>
+
+          <div style={{ background: "#050510", border: `1px solid ${s.color}15`, borderRadius: 8, padding: "14px 18px" }}>
+            <div style={{ fontSize: 9, color: s.color, letterSpacing: 2, textTransform: "uppercase", fontWeight: 700, marginBottom: 10 }}>Architecture Diagram</div>
+            {diagrams[s.diagram]}
+          </div>
+        </div>
+      ))}
+
+      <div style={{ background: "#0a0a18", border: "1px solid #a78bfa33", borderRadius: 10, padding: "18px 22px", marginTop: 8 }}>
+        <div style={{ fontSize: 9, letterSpacing: 2, color: "#a78bfa", textTransform: "uppercase", fontWeight: 700, marginBottom: 8 }}>The GraphRAG Breakthrough</div>
+        <div style={{ fontSize: 13, color: "#ccc", lineHeight: 1.75 }}>
+          Every generation above had one thing in common: the knowledge graph had to be built before retrieval — by hand, by supervised NLP, or by curation. The question "what's in my corpus?" required months of engineering before it could be asked. GraphRAG's breakthrough was using an LLM to construct the knowledge graph on-the-fly from any raw text corpus, then immediately use that same LLM to query it. This collapsed what was previously a two-team, months-long pipeline into a single automated system. The cost was high token usage; the gain was the ability to apply graph-based reasoning to any document collection with no upfront schema design.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  STRUCTURED KNOWLEDGE PAGE
+// ─────────────────────────────────────────────
+function StructuredKnowledgePage() {
+  const C = "#f59e0b";
+  const [codeTab, setCodeTab] = useState("contracts");
+
+  const codeExamples = {
+    contracts: {
+      label: "Contracts / Legal Docs",
+      embedding: `# ── GRAPH CONSTRUCTION FOR CONTRACTS ────────────────
+# Contracts have implicit hierarchical structure:
+# Document → Sections → Clauses → Obligations/Rights
+# Standard KG extraction misses this entirely.
+# The solution: schema-guided extraction with a
+# domain ontology we define BEFORE running the LLM.
+
+CONTRACT_SCHEMA = """
+Node types:
+  Party       (name, role: buyer|seller|licensor...)
+  Clause      (type: indemnity|liability|termination...,
+               text, section_number)
+  Obligation  (description, party_ref, deadline)
+  Right       (description, party_ref, condition)
+  Date        (value, event_type: effective|expiry|renewal)
+  Monetary    (amount, currency, frequency)
+
+Edge types:
+  PARTY_TO         (Contract → Party)
+  CONTAINS_CLAUSE  (Contract → Clause)
+  OBLIGATES        (Clause → Party, obligation_desc)
+  GRANTS_RIGHT     (Clause → Party, right_desc)
+  REFERENCES       (Clause → Clause, cross_ref_type)
+  CONDITIONED_ON   (Obligation → Clause)
+  EFFECTIVE_FROM   (Contract → Date)
+"""
+
+def build_contract_graph(contract_docs, llm):
+    G = SchemaGraph(CONTRACT_SCHEMA)
+
+    for doc in contract_docs:
+        # 1. Structural parsing — exploit the document's
+        #    own format before calling the LLM at all
+        sections = parse_document_structure(doc)
+        # Uses heading detection, numbering patterns,
+        # indentation — contracts are structurally regular
+
+        contract_node = G.add_node(
+            "Contract",
+            title=doc.title,
+            source=doc.path
+        )
+
+        for section in sections:
+            # 2. Schema-guided LLM extraction per section
+            # We give the LLM our ontology as a constraint
+            extracted = llm.extract_schema_guided(
+                text   = section.text,
+                schema = CONTRACT_SCHEMA,
+                prompt = SCHEMA_EXTRACTION_PROMPT
+            )
+            # LLM is told: "Only extract node/edge types
+            # defined in the schema above. Do not invent."
+
+            for party in extracted.parties:
+                p_node = G.add_or_merge_node(
+                    "Party", name=party.name, role=party.role
+                )
+                G.add_edge("PARTY_TO", contract_node, p_node)
+
+            for clause in extracted.clauses:
+                c_node = G.add_node(
+                    "Clause",
+                    type      = clause.type,
+                    text      = clause.text,
+                    section   = section.number
+                )
+                G.add_edge("CONTAINS_CLAUSE",
+                           contract_node, c_node)
+
+                # 3. Extract obligations/rights FROM clauses
+                for ob in clause.obligations:
+                    ob_node = G.add_node(
+                        "Obligation", description=ob.desc
+                    )
+                    G.add_edge("OBLIGATES",
+                               c_node, ob_node,
+                               party=ob.party)
+
+    return G`,
+      retrieval: `# ── HYBRID RETRIEVAL FOR CONTRACTS ──────────────────
+# Contracts require TWO retrieval modes simultaneously:
+# (a) Semantic: "find clauses about data privacy"
+# (b) Logical: "find all obligations on Vendor where
+#               deadline < 2025 AND type = delivery"
+# Pure vector search handles (a) badly for structured
+# legal concepts; pure graph traversal misses (a) for
+# paraphrased or implicit clauses.
+# Solution: run both and merge.
+
+def contract_retrieve(query, G, vector_store,
+                       embed_model, llm):
+
+    # ── Path 1: Schema-aware graph traversal ─────────
+    # Parse the query for structured filters
+    parsed = llm.parse_legal_query(query)
+    # For "show me all termination clauses where
+    #  either party can exit without penalty":
+    # parsed.clause_type = "termination"
+    # parsed.parties     = ["any"]
+    # parsed.condition   = "without penalty"
+
+    graph_results = G.traverse(
+        start_type  = "Clause",
+        filters     = {
+            "type": parsed.clause_type,
+        },
+        edge_follow = ["OBLIGATES", "GRANTS_RIGHT"],
+        depth       = 2
+    )
+
+    # ── Path 2: Semantic vector search ───────────────
+    # Catches paraphrased clauses the schema traversal
+    # might miss (e.g. "exit fee waiver" ≈ "no penalty")
+    q_emb = embed_model.encode(query)
+    # Clause nodes were embedded by their full text
+    semantic_hits = vector_store.search(
+        q_emb, k=15, filter={"node_type": "Clause"}
+    )
+
+    # ── Merge and re-rank ─────────────────────────────
+    # Clauses appearing in BOTH paths rank highest
+    graph_ids    = {n.id for n in graph_results}
+    semantic_ids = {h.id for h in semantic_hits}
+    overlap      = graph_ids & semantic_ids
+
+    ranked_clauses = (
+        [n for n in graph_results if n.id in overlap] +
+        [n for n in graph_results if n.id not in overlap] +
+        [h for h in semantic_hits if h.id not in graph_ids]
+    )[:10]
+
+    # ── Enrich context with graph neighbourhood ───────
+    context_parts = []
+    for clause in ranked_clauses:
+        # Pull the clause text + its parties + obligations
+        parties = G.get_neighbours(
+            clause, edge_type="PARTY_TO", reverse=True
+        )
+        obligations = G.get_neighbours(
+            clause, edge_type="OBLIGATES"
+        )
+        context_parts.append({
+            "clause_text" : clause.text,
+            "clause_type" : clause.type,
+            "contract"    : clause.source_contract,
+            "section"     : clause.section_number,
+            "parties"     : [p.name for p in parties],
+            "obligations" : [o.description for o in obligations],
+        })
+
+    return llm.answer(CONTRACT_PROMPT.format(
+        query=query, context=format_clauses(context_parts)
+    ))`,
+    },
+    websites: {
+      label: "Websites / HTML / Sitemaps",
+      embedding: `# ── GRAPH CONSTRUCTION FOR WEB CONTENT ──────────────
+# Websites have rich EXPLICIT structure that most
+# RAG systems throw away during HTML stripping:
+#   - URL hierarchy       /docs/api/auth/tokens
+#   - Navigation menus    (semantic sitemap)
+#   - Header hierarchy    h1 > h2 > h3 sections
+#   - Internal links      (cross-page references)
+#   - Structured metadata (JSON-LD, Open Graph, Schema.org)
+#   - DOM relationships   (tables, definition lists)
+# All of this is free structural signal.
+
+def build_web_graph(pages: List[HTMLPage], llm):
+    G = WebGraph()
+
+    for page in pages:
+        # 1. Parse URL into hierarchy nodes
+        # /docs/api/auth/tokens
+        # → Domain → Docs → API → Auth → Tokens
+        url_chain = parse_url_hierarchy(page.url)
+        url_node  = G.add_url_hierarchy(url_chain)
+
+        # 2. Parse DOM structure — preserve heading tree
+        dom_tree = parse_dom(page.html)
+        # Gives us: {h1: "Authentication",
+        #             children: [{h2: "Token Types",
+        #               children: [{h3: "Bearer Tokens",
+        #                 content: "Bearer tokens are..."}]}]}
+
+        def build_section_nodes(tree, parent=url_node):
+            for section in tree:
+                s_node = G.add_node(
+                    "Section",
+                    heading   = section.heading,
+                    level     = section.level,
+                    text      = section.content,
+                    url       = page.url,
+                    anchor    = section.anchor_id,
+                    embedding = embed(section.content)
+                )
+                G.add_edge("CONTAINS", parent, s_node)
+                # Recurse into sub-sections
+                if section.children:
+                    build_section_nodes(section.children,
+                                        s_node)
+        build_section_nodes(dom_tree)
+
+        # 3. Extract internal hyperlinks as graph edges
+        for link in dom_tree.all_links():
+            if is_internal(link.href):
+                G.add_deferred_edge(
+                    src_url  = page.url,
+                    tgt_url  = link.href,
+                    rel_type = "LINKS_TO",
+                    anchor   = link.text,
+                )
+
+        # 4. Extract Schema.org / JSON-LD structured data
+        # Many sites already have machine-readable metadata!
+        schema_data = extract_json_ld(page.html)
+        if schema_data:
+            G.ingest_schema_org(url_node, schema_data)
+            # e.g. { "@type": "Product",
+            #        "name": "Pro Plan",
+            #        "price": "$49/mo" }
+            # → directly becomes typed nodes, no LLM needed
+
+    # 5. Resolve deferred cross-page link edges
+    G.resolve_link_edges()
+
+    return G`,
+      retrieval: `# ── HYBRID RETRIEVAL FOR WEB CONTENT ────────────────
+# Web content needs three retrieval modes:
+# (a) Navigational: "how do I get to the pricing page?"
+#     → URL graph traversal
+# (b) Section-level semantic: "what does the docs say
+#     about rate limiting?"
+#     → vector search on section embeddings
+# (c) Cross-page multi-hop: "what plans include SSO,
+#     and what are the SSO setup requirements?"
+#     → graph traversal across LINKS_TO edges
+
+def web_retrieve(query, G, embed_model, llm, top_k=8):
+
+    q_emb = embed_model.encode(query)
+
+    # ── Classify query intent ─────────────────────────
+    intent = llm.classify_intent(query)
+    # "navigational" | "informational" | "multi-hop"
+
+    if intent == "navigational":
+        # Find URL nodes matching the query
+        url_matches = G.search_url_nodes(query)
+        return format_urls(url_matches)
+
+    elif intent == "informational":
+        # Pure semantic search on section nodes
+        section_hits = G.vector_search(
+            q_emb, node_type="Section", k=top_k
+        )
+        # Add parent-section context for each hit
+        # (so you know WHICH page and heading it's under)
+        context = []
+        for hit in section_hits:
+            breadcrumb = G.get_ancestors(hit, "CONTAINS")
+            context.append({
+                "text"       : hit.text,
+                "breadcrumb" : " > ".join(
+                    a.heading for a in breadcrumb
+                ),
+                "url"        : hit.url + "#" + hit.anchor,
+            })
+
+    elif intent == "multi-hop":
+        # Step 1: find seed section nodes semantically
+        seeds = G.vector_search(q_emb, node_type="Section",
+                                 k=5)
+
+        # Step 2: follow LINKS_TO edges to related pages
+        # This finds pages that the seed pages reference —
+        # exactly the cross-page reasoning vector RAG misses
+        expanded = set()
+        for seed in seeds:
+            page_node = G.get_page(seed.url)
+            linked    = G.get_neighbours(
+                page_node, edge_type="LINKS_TO", depth=2
+            )
+            expanded.update(linked)
+
+        # Step 3: semantic re-ranking within expanded set
+        candidates = G.vector_search_within(
+            q_emb, node_set=expanded, k=top_k
+        )
+        context = build_context(candidates, G)
+
+    return llm.answer(WEB_PROMPT.format(
+        query=query, context=context
+    ))`,
+    },
+    json: {
+      label: "APIs / JSON / Databases",
+      embedding: `# ── GRAPH CONSTRUCTION FOR STRUCTURED DATA ──────────
+# JSON/API/DB data is already structured — the schema
+# IS the ontology. You don't need LLM extraction at all
+# for the structure. You only need LLM to:
+# (a) generate textual descriptions of records
+# (b) infer semantic relationships the schema doesn't encode
+
+def build_structured_data_graph(schema, records, llm):
+    G = SchemaGraph()
+
+    # 1. Schema introspection — build graph skeleton
+    # from the data schema without any data yet
+    for table in schema.tables:
+        G.add_node_type(table.name, fields=table.columns)
+
+    for fk in schema.foreign_keys:
+        # Foreign keys become typed edges in the graph
+        G.add_edge_type(
+            src   = fk.from_table,
+            tgt   = fk.to_table,
+            label = fk.relationship_name or "REFERENCES",
+        )
+
+    # 2. Ingest records as graph nodes
+    for table_name, rows in records.items():
+        for row in rows:
+            node = G.add_node(table_name, **row)
+
+            # 3. LLM generates a natural language description
+            # of each record — this is what gets embedded
+            # for semantic search
+            node.description = llm.describe_record(
+                table  = table_name,
+                fields = row,
+                schema = schema.get_context(table_name)
+            )
+            # e.g. for a Product record:
+            # "Pro Plan: a subscription product at $49/month
+            #  targeting enterprise teams, includes SSO and
+            #  audit logs, limited to 50 users per workspace"
+            node.embedding = embed(node.description)
+
+    # 4. Resolve FK edges as actual graph edges
+    for fk in schema.foreign_keys:
+        for row in records[fk.from_table]:
+            if row[fk.column] is not None:
+                G.add_edge(
+                    fk.relationship_name,
+                    src_id=row["id"],
+                    tgt_id=row[fk.column],
+                    src_type=fk.from_table,
+                    tgt_type=fk.to_table,
+                )
+
+    # 5. LLM-inferred semantic edges (optional, powerful)
+    # Find records that are semantically related but
+    # have no FK relationship — e.g. two products that
+    # are often purchased together
+    G = infer_semantic_edges(G, embed, threshold=0.85)
+
+    return G`,
+      retrieval: `# ── HYBRID RETRIEVAL FOR STRUCTURED DATA ─────────────
+# The power of the graph over a raw DB query:
+# natural language questions can traverse FK chains
+# AND use semantic similarity — a SQL query cannot.
+
+def structured_data_retrieve(query, G, embed_model,
+                               llm, schema):
+
+    # ── Step 1: Classify query type ───────────────────
+    q_type = llm.classify(query,
+        types=["lookup", "aggregation", "multi-hop",
+               "semantic", "hybrid"])
+
+    if q_type == "lookup":
+        # Direct structured query — translate to Cypher/SQL
+        # LLM converts NL to graph query language
+        cypher = llm.nl_to_cypher(
+            question = query,
+            schema   = schema.to_description(),
+        )
+        # "How many users does Acme Corp have?"
+        # → MATCH (c:Company {name:'Acme Corp'})
+        #         -[:HAS_USER]->(u:User)
+        #   RETURN count(u)
+        return G.execute_cypher(cypher)
+
+    elif q_type == "semantic":
+        # Pure semantic: "show me enterprise-grade products"
+        # No exact field matches — need embedding search
+        q_emb = embed_model.encode(query)
+        hits  = G.vector_search(q_emb, k=10)
+        return format_results(hits)
+
+    elif q_type == "multi-hop":
+        # "Which customers use products with audit logs,
+        #  and what contracts do they have expiring soon?"
+        # This requires: Customer → Product → Feature
+        #                Customer → Contract → ExpiryDate
+        # No SQL JOIN can express this declaratively
+        # without knowing the exact schema path upfront.
+
+        q_emb    = embed_model.encode(query)
+        # Seed: find products with audit logs semantically
+        seeds    = G.vector_search(q_emb, node_type="Product",
+                                    k=5)
+        # Hop 1: find customers of those products
+        customers = G.traverse(
+            seeds, edge="HAS_PRODUCT", reverse=True
+        )
+        # Hop 2: find contracts for those customers
+        contracts = G.traverse(
+            customers, edge="HAS_CONTRACT"
+        )
+        # Filter: expiring soon
+        soon = [c for c in contracts
+                if c.expiry_date < date.today() + timedelta(90)]
+
+        context = build_multi_hop_context(
+            seeds, customers, soon, G
+        )
+        return llm.answer(QUERY_PROMPT.format(
+            query=query, context=context
+        ))
+
+    elif q_type == "hybrid":
+        # Run both structured traversal + semantic search
+        # then re-rank by combined score
+        cypher_results   = G.execute_cypher(
+            llm.nl_to_cypher(query, schema)
+        )
+        semantic_results = G.vector_search(
+            embed_model.encode(query), k=15
+        )
+        merged = rerank_hybrid(
+            cypher_results, semantic_results,
+            query, llm
+        )
+        return llm.answer(QUERY_PROMPT.format(
+            query=query, context=merged
+        ))`,
+    },
+  };
+
+  const challenges = [
+    { title: "Structural Blindness", desc: "Standard chunking strips all structure. A contract clause split across two chunks loses its section number, parent article, and signatory context. A website section loses its breadcrumb, URL, and cross-links." },
+    { title: "Schema Consistency", desc: "Unguided LLM extraction produces inconsistent node types — 'Indemnity Clause', 'indemnification clause', 'Clause 7.3 (Indemnification)' all become different nodes. You need a domain schema to normalize them." },
+    { title: "Hybrid Query Needs", desc: "Structured documents require both semantic search (paraphrased clauses, similar concepts) AND logical traversal (all clauses where Vendor is obligated). Neither alone is sufficient." },
+    { title: "Free vs Locked Structure", desc: "HTML and JSON have explicit machine-readable structure you can exploit directly — no LLM needed to discover it. Contracts and PDFs have implicit structure you must parse first (headings, numbering, tables) before graph extraction." },
+  ];
+
+  return (
+    <div style={{ padding: "28px 36px" }}>
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 10, letterSpacing: 3, color: "#555", textTransform: "uppercase", marginBottom: 6 }}>Chapter 11 · Applied Extension</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: "#f0f0f8", letterSpacing: -0.5, marginBottom: 10 }}>
+          GraphRAG for Structured Knowledge
+        </div>
+        <div style={{ fontSize: 13, color: "#888", lineHeight: 1.75, maxWidth: 720 }}>
+          Standard GraphRAG was designed for unstructured text corpora — news, literature, research papers. When your knowledge is already structured — contracts with defined clause types, websites with URL hierarchies and DOM trees, databases with explicit schemas — naive application fails. Structure is valuable signal that generic chunking destroys. Here is how to exploit it.
+        </div>
+      </div>
+
+      {/* Core challenges */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 28 }}>
+        {challenges.map((ch, i) => (
+          <div key={i} style={{ background: "#0f0f1e", border: "1px solid #f59e0b22", borderRadius: 8, padding: "12px 16px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#f59e0b", letterSpacing: 1, marginBottom: 6 }}>⚠ {ch.title}</div>
+            <div style={{ fontSize: 11, color: "#888", lineHeight: 1.65 }}>{ch.desc}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Strategy diagram */}
+      <div style={{ background: "#0a0a14", border: "1px solid #f59e0b22", borderRadius: 10, padding: "18px 22px", marginBottom: 28 }}>
+        <div style={{ fontSize: 9, letterSpacing: 2, color: C, textTransform: "uppercase", fontWeight: 700, marginBottom: 14 }}>General Strategy: Schema-First Graph Construction</div>
+        <svg viewBox="0 0 640 140" style={{ width: "100%", height: "auto" }}>
+          <defs><marker id="as" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill={C} /></marker></defs>
+          {[
+            ["Structured\nDocument", 55, 70, C],
+            ["Structural\nParser", 165, 40, "#60a5fa"],
+            ["Domain\nSchema/Ontology", 165, 100, "#34d399"],
+            ["Schema-Guided\nLLM Extraction", 295, 70, C],
+            ["Typed\nKnowledge Graph", 420, 70, "#a78bfa"],
+            ["Hybrid\nRetrieval", 540, 70, C],
+          ].map(([t, x, y, col], i) => (
+            <g key={i}>
+              {i > 0 && i !== 2 && (
+                <line
+                  x1={i===1?110:i===3?215:i===4?375:i===5?465:0}
+                  y1={i===1?55:i===3?70:i===4?70:i===5?70:0}
+                  x2={i===1?130:i===3?258:i===4?385:i===5?510:0}
+                  y2={i===1?48:i===3?70:i===4?70:i===5?70:0}
+                  stroke={col} strokeWidth={1.5} markerEnd="url(#as)"
+                />
+              )}
+              {i === 2 && <line x1={110} y1={85} x2={130} y2={95} stroke={col} strokeWidth={1.5} markerEnd="url(#as)" />}
+              {(i===1||i===2) && <line x1={210} y1={i===1?48:95} x2={250} y2={i===1?60:80} stroke={col} strokeWidth={1} strokeDasharray="3,2" markerEnd="url(#as)" />}
+              <rect x={x-50} y={y-22} width={100} height={44} rx={6}
+                fill="#050510" stroke={col} strokeWidth={i===3||i===5?2:1.5} />
+              <text x={x} y={y-2} textAnchor="middle" fill={col} fontSize={9} fontWeight={i===3||i===5?"700":"600"}>{t.split("\n")[0]}</text>
+              {t.includes("\n") && <text x={x} y={y+11} textAnchor="middle" fill={col} fontSize={8} opacity={0.8}>{t.split("\n")[1]}</text>}
+            </g>
+          ))}
+          <text x={165} y={130} textAnchor="middle" fill="#f59e0b" fontSize={8}>Exploit existing structure before LLM</text>
+          <text x={420} y={125} textAnchor="middle" fill="#a78bfa" fontSize={8} opacity={0.7}>Typed nodes + edges matching domain</text>
+        </svg>
+      </div>
+
+      {/* Code examples */}
+      <div style={{ fontSize: 9, letterSpacing: 2, color: C, textTransform: "uppercase", fontWeight: 700, marginBottom: 12 }}>Implementation by Document Type</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {Object.entries(codeExamples).map(([key, ex]) => (
+          <button key={key} onClick={() => setCodeTab(key)} style={{
+            padding: "6px 16px", borderRadius: 20,
+            border: `1px solid ${codeTab === key ? C : "#2a2a3a"}`,
+            background: codeTab === key ? `${C}18` : "transparent",
+            color: codeTab === key ? C : "#666",
+            fontSize: 10, fontWeight: 700, cursor: "pointer",
+            fontFamily: "inherit", letterSpacing: 0.3,
+          }}>{ex.label}</button>
+        ))}
+      </div>
+
+      {["Graph Construction", "Semantic Retrieval"].map((tabLabel, ti) => {
+        const tabKey = ti === 0 ? "embedding" : "retrieval";
+        const code   = codeExamples[codeTab][ti === 0 ? "embedding" : "retrieval"];
+        return (
+          <div key={ti} style={{ background: "#0d1117", border: `1px solid ${C}22`, borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 18px", background: "#161b22", borderBottom: `1px solid ${C}22` }}>
+              <span style={{ fontSize: 10, color: C, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>{tabLabel}</span>
+              <div style={{ display: "flex", gap: 5 }}>
+                {["#ff5f57", "#febc2e", "#28c840"].map(c => <div key={c} style={{ width: 10, height: 10, borderRadius: "50%", background: c }} />)}
+              </div>
+            </div>
+            <div style={{ padding: "16px 20px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, lineHeight: 1.65, overflowX: "auto", maxHeight: 420, overflowY: "auto" }}>
+              {code.split("\n").map((line, li) => {
+                const isComment = line.trim().startsWith("#");
+                return (
+                  <div key={li} style={{ whiteSpace: "pre", color: isComment ? "#5a8f5a" : "#d4d4d4" }}>
+                    {isComment ? line : line.split(/("[^"]*"|\b(?:def|for|if|elif|else|return|while|class|import|from|True|False|None|and|or|not|in)\b|\b\d+\.?\d*\b)/g).map((part, pi) => {
+                      if (/^"[^"]*"$/.test(part)) return <span key={pi} style={{ color: "#ce9178" }}>{part}</span>;
+                      if (/^\b(?:def|for|if|elif|else|return|while|class|import|from|True|False|None|and|or|not|in)\b$/.test(part)) return <span key={pi} style={{ color: "#c586c0" }}>{part}</span>;
+                      if (/^\b\d+\.?\d*\b$/.test(part)) return <span key={pi} style={{ color: "#b5cea8" }}>{part}</span>;
+                      return <span key={pi}>{part}</span>;
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Comparison table */}
+      <div style={{ background: "#0f0f1e", border: "1px solid #f59e0b22", borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
+        <div style={{ padding: "10px 18px", background: "#0d0d1e", borderBottom: "1px solid #f59e0b22", fontSize: 9, color: C, fontWeight: 700, letterSpacing: 2, textTransform: "uppercase" }}>At-a-Glance: Approach by Knowledge Type</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #1a1a2e" }}>
+                {["Knowledge Type", "Structure Signal", "Graph Construction", "Embedding Strategy", "Retrieval Mode"].map(h => (
+                  <th key={h} style={{ padding: "10px 14px", textAlign: "left", color: "#666", fontWeight: 700, fontSize: 10, letterSpacing: 0.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                ["Contracts / Legal", "Implicit (headings, numbering)", "Schema-guided LLM + structural parser", "Embed clause text + obligations", "Hybrid: schema traversal + vector"],
+                ["Websites / HTML", "Explicit (DOM, URL, links)", "DOM parser → section nodes + LINKS_TO edges", "Embed section content by heading", "Intent-aware: nav / semantic / multi-hop"],
+                ["APIs / JSON / DB", "Explicit (schema, FK relations)", "Schema introspection + LLM descriptions", "Embed LLM-generated record descriptions", "NL-to-Cypher + semantic fallback"],
+                ["PDFs / Reports", "Semi-implicit (layout, TOC)", "Layout parser + LLM section extraction", "Embed by section with breadcrumb", "Hierarchical RAPTOR-style retrieval"],
+                ["Unstructured text", "None", "LLM Open IE / entity extraction", "Embed entity descriptions + summaries", "GraphRAG community summarisation"],
+              ].map((row, ri) => (
+                <tr key={ri} style={{ borderBottom: "1px solid #111118", background: ri % 2 === 0 ? "transparent" : "#0a0a12" }}>
+                  {row.map((cell, ci) => (
+                    <td key={ci} style={{ padding: "9px 14px", color: ci === 0 ? C : "#999", fontWeight: ci === 0 ? 700 : 400 }}>{cell}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={{ background: `${C}0a`, borderLeft: `4px solid ${C}`, borderRadius: "0 8px 8px 0", padding: "14px 18px" }}>
+        <div style={{ fontSize: 9, letterSpacing: 2, color: C, textTransform: "uppercase", fontWeight: 700, marginBottom: 6 }}>Core Principle</div>
+        <div style={{ fontSize: 13, color: "#ccc", lineHeight: 1.75, fontStyle: "italic" }}>
+          The rule of thumb: exploit whatever structure already exists before calling an LLM. If the document has a schema (JSON, DB), use it directly — only use the LLM to generate natural language descriptions for embedding. If the document has implicit structure (contracts, PDFs), parse that structure first with deterministic tools, then use schema-guided LLM extraction within each structural unit. If there is no structure at all, fall back to standard GraphRAG entity extraction. Every layer of pre-existing structure you preserve is information you don't have to re-infer at query time.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  MAIN APP
+// ─────────────────────────────────────────────
+export default function App() {
+  const [page, setPage]       = useState("before"); // "before" | number | "structured"
+  const [active, setActive]   = useState(0);
+  const [stepIdx, setStepIdx] = useState(0);
+
+  const sys = typeof page === "number" ? systems[page] : null;
+  const DiagramComp = sys ? diagramComponents[sys.diagram] : null;
+
+  useEffect(() => { setStepIdx(0); }, [page]);
+
+  // Helper: navigate to system by index
+  const goToSystem = (i) => setPage(i);
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#0a0a0f",
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      color: "#e8e8f0", display: "flex", flexDirection: "column",
+    }}>
+      {/* Header */}
+      <div style={{
+        padding: "20px 32px 14px",
+        borderBottom: "1px solid #1a1a2e",
+        background: "linear-gradient(180deg, #0d0d1a 0%, #0a0a0f 100%)",
+      }}>
+        <div style={{ fontSize: 10, letterSpacing: 4, color: "#444", textTransform: "uppercase", marginBottom: 4 }}>
+          Knowledge Graph RAG · Visual + Code Research Guide
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: -0.5, color: "#f0f0f8" }}>
+          GraphRAG & Graph Knowledge Representation — Deep Dive
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {/* Sidebar */}
+        <div style={{
+          width: 210, flexShrink: 0,
+          borderRight: "1px solid #1a1a2e",
+          padding: "12px 0", background: "#080810",
+          overflowY: "auto",
+        }}>
+          {/* Before GraphRAG entry */}
+          <button onClick={() => setPage("before")} style={{
+            display: "block", width: "100%", textAlign: "left",
+            padding: "9px 16px",
+            background: page === "before" ? "#a78bfa18" : "transparent",
+            border: "none",
+            borderLeft: page === "before" ? "3px solid #a78bfa" : "3px solid transparent",
+            cursor: "pointer", transition: "all 0.15s",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 13, color: "#a78bfa" }}>◁</span>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: page === "before" ? "#a78bfa" : "#888", letterSpacing: 0.2 }}>Before GraphRAG</div>
+                <div style={{ fontSize: 9, color: "#444", marginTop: 1 }}>History · Origins</div>
+              </div>
+            </div>
+          </button>
+
+          {/* Divider */}
+          <div style={{ margin: "8px 16px", borderTop: "1px solid #1a1a2e", fontSize: 8, color: "#333", paddingTop: 6, letterSpacing: 2, textTransform: "uppercase" }}>Modern Systems</div>
+
+          {systems.map((s, i) => (
+            <button key={s.id} onClick={() => setPage(i)} style={{
+              display: "block", width: "100%", textAlign: "left",
+              padding: "9px 16px", background: page === i ? `${s.color}18` : "transparent",
+              border: "none",
+              borderLeft: page === i ? `3px solid ${s.color}` : "3px solid transparent",
+              cursor: "pointer", transition: "all 0.15s",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13, color: s.color }}>{s.icon}</span>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: page === i ? s.color : "#888", letterSpacing: 0.2 }}>{s.name}</div>
+                  <div style={{ fontSize: 9, color: "#444", marginTop: 1 }}>{s.year} · {s.origin}</div>
+                </div>
+              </div>
+            </button>
+          ))}
+
+          {/* Divider */}
+          <div style={{ margin: "8px 16px", borderTop: "1px solid #1a1a2e", fontSize: 8, color: "#333", paddingTop: 6, letterSpacing: 2, textTransform: "uppercase" }}>Applied Topics</div>
+
+          {/* Structured Knowledge entry */}
+          <button onClick={() => setPage("structured")} style={{
+            display: "block", width: "100%", textAlign: "left",
+            padding: "9px 16px",
+            background: page === "structured" ? "#f59e0b18" : "transparent",
+            border: "none",
+            borderLeft: page === "structured" ? "3px solid #f59e0b" : "3px solid transparent",
+            cursor: "pointer", transition: "all 0.15s",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 13, color: "#f59e0b" }}>▦</span>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: page === "structured" ? "#f59e0b" : "#888", letterSpacing: 0.2 }}>Structured Docs</div>
+                <div style={{ fontSize: 9, color: "#444", marginTop: 1 }}>Contracts · HTML · APIs</div>
+              </div>
+            </div>
+          </button>
+        </div>
+
+        {/* Content area — conditional on page type */}
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {page === "before" && <BeforeGraphRAGPage />}
+          {page === "structured" && <StructuredKnowledgePage />}
+          {typeof page === "number" && (() => {
+            const sys = systems[page];
+            const DiagramComp = diagramComponents[sys.diagram];
+            return (
+              <div style={{ padding: "28px 36px" }}>
+
+              {/* Title */}
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5 }}>
+                    <span style={{ fontSize: 24, color: sys.color }}>{sys.icon}</span>
+                    <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: -0.5, color: "#f0f0f8" }}>{sys.name}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: sys.color, marginBottom: 3 }}>{sys.tagline}</div>
+                  <div style={{ fontSize: 10, color: "#555" }}>{sys.origin} · {sys.year}</div>
+                </div>
+                <div style={{ display: "flex", gap: 6, paddingTop: 4 }}>
+                  {systems.map((_, i) => (
+                    <div key={i} onClick={() => setPage(i)} style={{
+                      width: 7, height: 7, borderRadius: "50%",
+                      background: i === page ? systems[i].color : "#222",
+                      cursor: "pointer",
+                    }} />
+                  ))}
+                </div>
+              </div>
+                  cursor: "pointer",
+                }} />
+              ))}
+            </div>
+          </div>
+
+          {/* Paper Links */}
+          {sys.papers && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 }}>
+              {sys.papers.map((p, i) => (
+                <a key={i} href={p.url} target="_blank" rel="noopener noreferrer" style={{
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "5px 12px", borderRadius: 20,
+                  border: `1px solid ${sys.color}55`,
+                  background: `${sys.color}11`,
+                  color: sys.color, fontSize: 10, fontWeight: 700,
+                  textDecoration: "none", letterSpacing: 0.3,
+                  transition: "all 0.15s",
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}>
+                  <span style={{ fontSize: 10 }}>{i === 0 ? "📄" : "⌥"}</span>
+                  {p.label}
+                  <span style={{ opacity: 0.6, fontSize: 9 }}>↗</span>
+                </a>
+              ))}
+            </div>
+          )}
+
+          {/* Summary */}
+          <div style={{
+            background: "#0f0f1e", border: `1px solid ${sys.color}33`,
+            borderRadius: 10, padding: "16px 20px", marginBottom: 24,
+            lineHeight: 1.75, fontSize: 13, color: "#ccc",
+          }}>{sys.summary}</div>
+
+          {/* Strengths / Weaknesses */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 24 }}>
+            <div style={{ background: "#0f0f1e", border: `1px solid ${sys.color}22`, borderRadius: 8, padding: "12px 16px" }}>
+              <div style={{ fontSize: 9, letterSpacing: 2, color: sys.color, textTransform: "uppercase", marginBottom: 8, fontWeight: 700 }}>Strengths</div>
+              {sys.strengths.map((s, i) => (
+                <div key={i} style={{ display: "flex", gap: 7, marginBottom: 5, alignItems: "flex-start" }}>
+                  <span style={{ color: sys.color, fontSize: 9, marginTop: 2 }}>◆</span>
+                  <span style={{ fontSize: 11, color: "#bbb" }}>{s}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ background: "#0f0f1e", border: "1px solid #1e1e2e", borderRadius: 8, padding: "12px 16px" }}>
+              <div style={{ fontSize: 9, letterSpacing: 2, color: "#555", textTransform: "uppercase", marginBottom: 8, fontWeight: 700 }}>Limitations</div>
+              {sys.weaknesses.map((w, i) => (
+                <div key={i} style={{ display: "flex", gap: 7, marginBottom: 5, alignItems: "flex-start" }}>
+                  <span style={{ color: "#444", fontSize: 9, marginTop: 2 }}>◇</span>
+                  <span style={{ fontSize: 11, color: "#666" }}>{w}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Architecture Diagram */}
+          <div style={{ background: "#0a0a14", border: `1px solid ${sys.color}22`, borderRadius: 10, padding: "18px 22px", marginBottom: 24 }}>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: sys.color, textTransform: "uppercase", marginBottom: 14, fontWeight: 700 }}>Architecture Diagram</div>
+            <DiagramComp color={sys.color} accent={sys.accent} />
+          </div>
+
+          {/* Step-by-step */}
+          <div style={{ background: "#0f0f1e", border: `1px solid ${sys.color}33`, borderRadius: 10, padding: "18px 22px", marginBottom: 24 }}>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: sys.color, textTransform: "uppercase", marginBottom: 14, fontWeight: 700 }}>Step-by-Step Pipeline</div>
+            <div style={{ display: "flex", gap: 5, marginBottom: 18, flexWrap: "wrap" }}>
+              {sys.steps.map((s, i) => (
+                <button key={i} onClick={() => setStepIdx(i)} style={{
+                  width: 26, height: 26, borderRadius: "50%",
+                  background: i === stepIdx ? sys.color : i < stepIdx ? `${sys.color}44` : "#1a1a2e",
+                  border: `1px solid ${i <= stepIdx ? sys.color : "#2a2a3a"}`,
+                  color: i === stepIdx ? "#000" : i < stepIdx ? sys.color : "#555",
+                  fontSize: 9, fontWeight: 700, cursor: "pointer", transition: "all 0.15s",
+                }}>{i + 1}</button>
+              ))}
+            </div>
+            <div style={{
+              background: `${sys.color}0d`, border: `1px solid ${sys.color}44`,
+              borderRadius: 8, padding: "14px 18px",
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: sys.color, marginBottom: 5 }}>
+                Step {stepIdx + 1} / {sys.steps.length}: {sys.steps[stepIdx].label}
+              </div>
+              <div style={{ fontSize: 13, color: "#ccc", lineHeight: 1.65 }}>{sys.steps[stepIdx].desc}</div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button onClick={() => setStepIdx(s => Math.max(0, s - 1))} disabled={stepIdx === 0} style={{
+                padding: "7px 18px", borderRadius: 6, border: `1px solid ${sys.color}44`,
+                background: "transparent", color: stepIdx === 0 ? "#333" : sys.color,
+                fontSize: 11, cursor: stepIdx === 0 ? "default" : "pointer", fontFamily: "inherit", fontWeight: 600,
+              }}>← Prev</button>
+              <button onClick={() => setStepIdx(s => Math.min(sys.steps.length - 1, s + 1))} disabled={stepIdx === sys.steps.length - 1} style={{
+                padding: "7px 18px", borderRadius: 6, border: `1px solid ${sys.color}44`,
+                background: stepIdx < sys.steps.length - 1 ? `${sys.color}22` : "transparent",
+                color: stepIdx === sys.steps.length - 1 ? "#333" : sys.color,
+                fontSize: 11, cursor: stepIdx === sys.steps.length - 1 ? "default" : "pointer", fontFamily: "inherit", fontWeight: 600,
+              }}>Next →</button>
+              <span style={{ fontSize: 10, color: "#444", alignSelf: "center", marginLeft: 6 }}>{stepIdx + 1} / {sys.steps.length}</span>
+            </div>
+          </div>
+
+          {/* ── PSEUDO-CODE SECTION ── */}
+          <div style={{
+            fontSize: 9, letterSpacing: 2, color: sys.color,
+            textTransform: "uppercase", marginBottom: 14, fontWeight: 700,
+          }}>
+            Pseudo-Code Implementation
+          </div>
+          <CodePanel sysId={sys.id} color={sys.color} />
+
+          {/* Key insight */}
+          <div style={{
+            background: `${sys.color}09`,
+            borderLeft: `4px solid ${sys.color}`,
+            borderRadius: "0 8px 8px 0",
+            padding: "14px 18px", marginBottom: 24,
+          }}>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: sys.color, textTransform: "uppercase", marginBottom: 6, fontWeight: 700 }}>Key Insight</div>
+            <div style={{ fontSize: 13, color: "#ccc", lineHeight: 1.7, fontStyle: "italic" }}>{sys.insight}</div>
+          </div>
+
+          {/* Nav */}
+          <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 16, borderTop: "1px solid #1a1a2e" }}>
+            <button onClick={() => setPage(p => typeof p === "number" ? Math.max(0, p - 1) : 0)} style={{
+              padding: "9px 20px", borderRadius: 6, border: "1px solid #2a2a3a",
+              background: "transparent", color: typeof page === "number" && page === 0 ? "#333" : "#888",
+              fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+            }}>← {typeof page === "number" && page > 0 ? systems[page - 1].name : "—"}</button>
+            <span style={{ fontSize: 10, color: "#444", alignSelf: "center" }}>{typeof page === "number" ? page + 1 : "?"} / {systems.length}</span>
+            <button onClick={() => setPage(p => typeof p === "number" ? Math.min(systems.length - 1, p + 1) : 0)} style={{
+              padding: "9px 20px", borderRadius: 6, border: "1px solid #2a2a3a",
+              background: typeof page === "number" && page < systems.length - 1 ? "#1a1a2e" : "transparent",
+              color: typeof page === "number" && page === systems.length - 1 ? "#333" : "#ccc",
+              fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+            }}>{typeof page === "number" && page < systems.length - 1 ? systems[page + 1].name : "—"} →</button>
+          </div>
+
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+    </div>
+  );
+}
