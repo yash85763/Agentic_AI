@@ -1,1118 +1,795 @@
-Below is a complete book-based roadmap to learn how LLMs are made, with strong math, deep learning, transformers, Mixture-of-Experts models like Mixtral, reinforcement learning, and RL for LLMs.
+AI, LLM, Reinforcement Learning & Systems Master Roadmap
 
-Think of this as a multi-volume curriculum, not a random reading list.
-
-⸻
-
-The Big Sequence
-
-0. Mathematical thinking
-1. Linear algebra
-2. Calculus
-3. Probability
-4. Statistics
-5. Optimization
-6. Information theory
-7. Classical machine learning
-8. Deep learning
-9. NLP and transformers
-10. Build an LLM from scratch
-11. Reinforcement learning
-12. Deep reinforcement learning
-13. RLHF / DPO / GRPO / reasoning models
-14. Systems: GPUs, distributed training, kernels, inference
-15. Research papers
-
-Your goal should be:
-
-First understand the mathematics of learning, then understand neural networks, then transformers, then LLM training, then RL/RLHF, then modern architectures like MoE, Mixtral, DeepSeek-style reasoning models, and agentic systems.
+From Mathematical Foundations to Building and Training Large Language Models
 
 ⸻
 
-Volume 0: Mathematical Maturity
+Purpose
 
-This phase teaches you how to read mathematical arguments without fear.
+This roadmap is designed for someone who wants to understand:
 
-1. How to Prove It — Daniel J. Velleman
+* How Large Language Models (LLMs) are built
+* Why transformers work
+* How embeddings learn meaning
+* How Mixtral and Mixture-of-Experts (MoE) models work
+* How Reinforcement Learning (RL) works
+* How RLHF, DPO, and GRPO are used in modern LLMs
+* How distributed training and GPU systems work
+* How to eventually design advanced AI systems such as Agentic AI, Cognitive Operating Systems, and Jarvis-like architectures
 
-Read this first.
+The roadmap follows a simple philosophy:
 
-Focus on:
+Mathematics
+    ↓
+Machine Learning
+    ↓
+Deep Learning
+    ↓
+Transformers
+    ↓
+LLMs
+    ↓
+Reinforcement Learning
+    ↓
+RL for LLMs
+    ↓
+Agentic AI
+    ↓
+AI Operating Systems
 
-Logic
-Sets
-Functions
-Relations
-Proofs
-Induction
-Mathematical notation
+⸻
 
-Why it matters for LLMs:
+Volume 0: Mathematical Thinking
 
-LLM papers often assume you can follow abstract notation. This book helps you stop being blocked by symbols.
+Goal
 
-Read: Chapters 1–6.
+Develop mathematical maturity and become comfortable reading research papers.
+
+⸻
+
+Book 1
+
+How to Prove It
+
+Author: Daniel J. Velleman
+
+Topics
+
+* Logic
+* Sets
+* Functions
+* Relations
+* Proofs
+* Mathematical induction
+
+Why It Matters
+
+Research papers assume familiarity with mathematical notation and logical reasoning.
 
 ⸻
 
 Volume 1: Linear Algebra
 
-Linear algebra is the language of embeddings, attention, neural networks, LoRA, quantization, SVD, PCA, and GPU matrix multiplication.
+Goal
 
-2. Introduction to Linear Algebra — Gilbert Strang
+Understand the language of neural networks.
 
-This should be your first serious AI math book.
-
-Focus on:
-
-Vectors
-Matrices
-Matrix multiplication
-Column space
-Null space
-Rank
-Orthogonality
-Projections
-Eigenvalues
-Eigenvectors
-SVD
-
-Why it matters:
-
-tokens → embeddings → matrix multiplications → attention → transformer blocks
-
-LLMs are mostly repeated matrix operations.
-
-Read: Almost the whole book, but especially chapters on vector spaces, orthogonality, eigenvalues, and SVD.
+Everything in modern AI is ultimately matrix multiplication.
 
 ⸻
 
-3. Linear Algebra Done Right — Sheldon Axler
+Book 2
 
-This is more abstract and deeper.
+Introduction to Linear Algebra
 
-Do not read it before Strang.
+Author: Gilbert Strang
 
-Focus on:
+Topics
 
-Vector spaces
-Linear maps
-Invariant subspaces
-Eigenvalues
-Spectral theorem
-Inner product spaces
+* Vectors
+* Matrices
+* Matrix multiplication
+* Vector spaces
+* Orthogonality
+* Eigenvalues
+* Eigenvectors
+* Singular Value Decomposition (SVD)
 
-Why it matters:
+AI Applications
 
-This gives you the deeper intuition behind representation spaces and transformations.
+* Embeddings
+* Attention
+* LoRA
+* PCA
+* Quantization
 
-Read selectively after Strang.
+⸻
+
+Book 3
+
+Linear Algebra Done Right
+
+Author: Sheldon Axler
+
+Topics
+
+* Linear operators
+* Vector spaces
+* Spectral theorem
+* Inner product spaces
+
+AI Applications
+
+Provides deeper intuition behind representation spaces.
 
 ⸻
 
 Volume 2: Calculus
 
-Calculus explains how models learn through gradients.
+Goal
 
-4. Calculus — Michael Spivak
-
-This is rigorous and beautiful.
-
-Focus on:
-
-Limits
-Derivatives
-Chain rule
-Taylor expansion
-Integrals
-Sequences
-Series
-
-Why it matters:
-
-Backpropagation is essentially the chain rule applied repeatedly through a computation graph.
-
-Read selectively. You do not need to master every proof at first.
+Understand gradients and optimization.
 
 ⸻
 
-5. Vector Calculus — Marsden and Tromba
+Book 4
 
-After single-variable calculus, move to multivariable calculus.
+Calculus
 
-Focus on:
+Author: Michael Spivak
 
-Partial derivatives
-Gradients
-Jacobians
-Hessians
-Directional derivatives
-Multivariable chain rule
+Topics
 
-Why it matters:
+* Limits
+* Derivatives
+* Integrals
+* Chain rule
+* Taylor series
 
-Neural network parameters are not one variable. They are millions or billions of variables. Training is multivariable optimization.
+AI Applications
+
+Backpropagation is repeated application of the chain rule.
+
+⸻
+
+Book 5
+
+Vector Calculus
+
+Authors: Marsden & Tromba
+
+Topics
+
+* Partial derivatives
+* Gradients
+* Jacobians
+* Hessians
+* Multivariable optimization
+
+AI Applications
+
+Training involves optimizing millions or billions of parameters simultaneously.
 
 ⸻
 
 Volume 3: Probability
 
-LLMs are probability models.
+Goal
 
-They do not “know” the next word. They estimate:
-
-P(next token | previous tokens)
-
-6. Introduction to Probability — Bertsekas and Tsitsiklis
-
-Focus on:
-
-Conditional probability
-Bayes rule
-Random variables
-Expectation
-Variance
-Distributions
-Law of large numbers
-Central limit theorem
-
-Why it matters:
-
-Next-token prediction, sampling, temperature, top-k, top-p, RL policies, and uncertainty all depend on probability.
+Understand uncertainty and prediction.
 
 ⸻
 
-7. Probability Theory: The Logic of Science — E.T. Jaynes
+Book 6
 
-Read this later, not first.
+Introduction to Probability
 
-Why it matters:
+Authors: Bertsekas & Tsitsiklis
 
-Jaynes teaches probability as reasoning under uncertainty. That mindset is very useful for understanding intelligence, inference, and language models.
+Topics
+
+* Conditional probability
+* Bayes theorem
+* Expectations
+* Variance
+* Random variables
+* Central Limit Theorem
+
+AI Applications
+
+LLMs estimate:
+
+P(next token | previous tokens)
+
+⸻
+
+Book 7
+
+Probability Theory: The Logic of Science
+
+Author: E.T. Jaynes
+
+Topics
+
+* Bayesian reasoning
+* Uncertainty
+* Inference
+
+AI Applications
+
+Provides a deeper perspective on intelligence as probabilistic reasoning.
 
 ⸻
 
 Volume 4: Statistics
 
-Statistics teaches you how models estimate patterns from data.
+Goal
 
-8. All of Statistics — Larry Wasserman
+Learn how models learn patterns from data.
 
-Focus on:
+⸻
 
-MLE
-Bias and variance
-Estimation
-Confidence intervals
-Regression
-Bayesian inference
-Hypothesis testing
-Nonparametric methods
+Book 8
 
-Why it matters:
+All of Statistics
 
-Training an LLM is statistical estimation at massive scale.
+Author: Larry Wasserman
 
-The model sees data and adjusts parameters so its predicted distribution becomes closer to the real distribution.
+Topics
+
+* Estimation
+* Maximum Likelihood Estimation
+* Regression
+* Confidence intervals
+* Bayesian inference
+* Hypothesis testing
+
+AI Applications
+
+Model training is statistical estimation at scale.
 
 ⸻
 
 Volume 5: Optimization
 
-Optimization is where many AI engineers stay weak.
+Goal
 
-But training LLMs is fundamentally an optimization problem.
-
-9. Convex Optimization — Stephen Boyd and Lieven Vandenberghe
-
-Focus on:
-
-Convex sets
-Convex functions
-Gradient descent
-Lagrange multipliers
-Duality
-Constrained optimization
-
-Why it matters:
-
-Deep learning is mostly non-convex, but convex optimization gives you the language to understand why optimization is hard and what good optimization should look like.
+Understand how neural networks learn.
 
 ⸻
 
-10. Numerical Optimization — Jorge Nocedal and Stephen Wright
+Book 9
 
-Read this after Boyd.
+Convex Optimization
 
-Focus on:
+Authors: Stephen Boyd & Lieven Vandenberghe
 
-Gradient descent
-Newton methods
-Quasi-Newton methods
-Line search
-Trust regions
-Stochastic optimization
+Topics
 
-Why it matters:
+* Convexity
+* Gradient descent
+* Constraints
+* Duality
+* Lagrangian optimization
 
-Adam, SGD, momentum, learning-rate schedules, and training stability are all optimization topics.
+AI Applications
+
+Provides the foundation for understanding learning algorithms.
+
+⸻
+
+Book 10
+
+Numerical Optimization
+
+Authors: Jorge Nocedal & Stephen Wright
+
+Topics
+
+* Gradient descent
+* Newton methods
+* Quasi-Newton methods
+* Stochastic optimization
+
+AI Applications
+
+Explains Adam, SGD, Momentum, and learning-rate schedules.
 
 ⸻
 
 Volume 6: Information Theory
 
-Information theory explains entropy, cross-entropy loss, KL divergence, compression, and why language modeling works.
+Goal
 
-11. Elements of Information Theory — Cover and Thomas
+Understand why language modeling works.
 
-Focus on:
+⸻
 
-Entropy
-Cross entropy
-KL divergence
-Mutual information
-Source coding
-Channel capacity
-Compression
+Book 11
 
-Why it matters:
+Elements of Information Theory
 
-The basic LLM objective is usually cross-entropy loss.
+Authors: Cover & Thomas
 
-In simple terms:
+Topics
 
-The model predicts a probability distribution.
-The true next token is known.
-Cross-entropy punishes the model when it assigns low probability to the correct token.
+* Entropy
+* Cross entropy
+* KL divergence
+* Mutual information
+* Compression
 
-This book explains the deeper theory behind that.
+AI Applications
+
+Explains the mathematics behind:
+
+* Cross-entropy loss
+* Token prediction
+* Information compression
 
 ⸻
 
 Volume 7: Classical Machine Learning
 
-Before deep learning, understand what machine learning was trying to solve.
+Goal
 
-12. Pattern Recognition and Machine Learning — Christopher Bishop
-
-Focus on:
-
-Linear models
-Bayesian methods
-Neural networks
-Kernel methods
-Graphical models
-EM algorithm
-Mixture models
-Approximate inference
-
-Why it matters:
-
-Many modern AI concepts have roots here: representation learning, probabilistic modeling, latent variables, mixture models, and approximate inference.
+Understand ML before deep learning.
 
 ⸻
 
-13. The Elements of Statistical Learning — Hastie, Tibshirani, Friedman
+Book 12
 
-This is mathematically deeper than most ML books.
+Pattern Recognition and Machine Learning
 
-Focus on:
+Author: Christopher Bishop
 
-Bias-variance tradeoff
-Regularization
-Decision trees
-Boosting
-SVMs
-Model selection
-Ensemble methods
+Topics
 
-Why it matters:
+* Linear models
+* Bayesian methods
+* Mixture models
+* EM algorithm
+* Graphical models
 
-It helps you understand generalization, overfitting, and why scaling data/models changes behavior.
+⸻
+
+Book 13
+
+Elements of Statistical Learning
+
+Authors: Hastie, Tibshirani, Friedman
+
+Topics
+
+* Regularization
+* Decision trees
+* Boosting
+* Model selection
+* Generalization
 
 ⸻
 
 Volume 8: Deep Learning
 
-Now you are ready for neural networks properly.
+Goal
 
-14. Understanding Deep Learning — Simon J.D. Prince
-
-Use this before Goodfellow.
-
-It is more modern and more readable. MIT Press describes it as an accessible and up-to-date treatment that balances theory and practice.  
-
-Focus on:
-
-Neural networks
-Loss functions
-Backpropagation
-Optimization
-Regularization
-Convolutional networks
-Transformers
-Generative models
-
-Why it matters:
-
-This book builds intuition very well.
+Understand modern neural networks.
 
 ⸻
 
-15. Deep Learning — Ian Goodfellow, Yoshua Bengio, Aaron Courville
+Book 14
 
-This is the classic deep learning textbook. The official site describes it as a resource for students and practitioners entering machine learning and deep learning, and the online version is available for free.  
+Understanding Deep Learning
 
-Focus on:
+Author: Simon J.D. Prince
 
-Linear algebra review
-Probability review
-Numerical computation
-Machine learning basics
-Deep feedforward networks
-Regularization
-Optimization
-CNNs
-RNNs
-Representation learning
-Generative models
+Topics
 
-Why it matters:
+* Neural networks
+* Backpropagation
+* Optimization
+* Transformers
+* Generative models
 
-This is the bridge from classical ML to modern neural networks.
+⸻
 
-Read after Prince, not before.
+Book 15
+
+Deep Learning
+
+Authors: Goodfellow, Bengio, Courville
+
+Topics
+
+* Deep feedforward networks
+* Optimization
+* Regularization
+* CNNs
+* RNNs
+* Representation learning
 
 ⸻
 
 Volume 9: NLP and Transformers
 
-Now move into language.
+Goal
 
-16. Speech and Language Processing — Jurafsky and Martin
-
-Focus on:
-
-Language modeling
-N-grams
-POS tagging
-Parsing
-Semantics
-Information extraction
-Neural language models
-Transformers
-Machine translation
-Question answering
-Dialogue systems
-
-Why it matters:
-
-Before transformers, NLP had decades of ideas. This book helps you understand what transformers replaced and what they inherited.
+Understand language models.
 
 ⸻
 
-17. Natural Language Processing with Transformers — Lewis Tunstall, Leandro von Werra, Thomas Wolf
+Book 16
 
-Focus on:
+Speech and Language Processing
 
-Hugging Face ecosystem
-Tokenizers
-Transformers
-Fine-tuning
-Text classification
-Question answering
-Summarization
-Generation
-Efficient deployment
+Authors: Jurafsky & Martin
 
-Why it matters:
+Topics
 
-This is practical. It shows how transformer models are actually used.
+* Language modeling
+* Parsing
+* Semantics
+* NLP fundamentals
+* Neural NLP
 
 ⸻
 
-Volume 10: Build an LLM From Scratch
+Book 17
 
-This is where your understanding becomes real.
+Natural Language Processing with Transformers
 
-18. Build a Large Language Model (From Scratch) — Sebastian Raschka
+Authors: Lewis Tunstall, Leandro von Werra, Thomas Wolf
 
-This should be one of your most important books.
+Topics
 
-The author’s page describes it as a step-by-step guide to creating your own LLM, explaining each stage with diagrams, text, and examples.   The companion page says it covers text embeddings, attention, GPT-style architecture components, pretraining, and finetuning.  
-
-Focus on:
-
-Tokenization
-Token embeddings
-Positional embeddings
-Self-attention
-Causal attention
-Multi-head attention
-Transformer blocks
-GPT architecture
-Pretraining
-Instruction fine-tuning
-Classification fine-tuning
-
-Why it matters:
-
-This book makes LLMs feel buildable instead of magical.
-
-Read this with code.
-
-Do not just read. Implement.
+* Transformers
+* HuggingFace
+* Fine-tuning
+* Generation
 
 ⸻
 
-Volume 11: Reinforcement Learning Foundations
+Volume 10: Build an LLM from Scratch
 
-Now start RL.
+Goal
 
-RL is not just another ML topic. It is about learning through interaction, reward, and long-term consequences.
-
-19. Reinforcement Learning: An Introduction — Richard Sutton and Andrew Barto
-
-This is the RL bible. The official page lists the second edition from MIT Press, and the authors provide the full book online.  
-
-Focus on:
-
-Multi-armed bandits
-Markov Decision Processes
-Bellman equations
-Dynamic programming
-Monte Carlo methods
-Temporal-difference learning
-SARSA
-Q-learning
-Eligibility traces
-Policy gradients
-Actor-critic methods
-
-Why it matters:
-
-RLHF, PPO, reward models, reasoning models, and agents all depend on these foundations.
-
-Read slowly.
-
-This book is not optional.
+Build GPT-like models yourself.
 
 ⸻
 
-20. Algorithms for Decision Making — Mykel Kochenderfer, Tim Wheeler, Kyle Wray
+Book 18
 
-Read this alongside Sutton and Barto.
+Build a Large Language Model (From Scratch)
 
-Focus on:
+Author: Sebastian Raschka
 
-Sequential decision making
-MDPs
-POMDPs
-Planning
-Bandits
-Reinforcement learning
-Policy search
-Multi-agent decision making
+Topics
 
-Why it matters:
+* Tokenization
+* Embeddings
+* Self-attention
+* Multi-head attention
+* Transformer blocks
+* GPT architecture
+* Pretraining
+* Fine-tuning
 
-It gives you a broader decision-making view, not just RL algorithms.
+Expected Outcome
+
+Build your own GPT model.
 
 ⸻
 
-21. Algorithms for Reinforcement Learning — Csaba Szepesvári
+Volume 11: Reinforcement Learning
 
-Read after Sutton and Barto.
+Goal
 
-Focus on:
+Understand learning through rewards.
 
-Value prediction
-Control
-Planning
-Approximation
-Policy gradient methods
-Theoretical guarantees
+⸻
 
-Why it matters:
+Book 19
 
-This book is more mathematical and compact. It helps you move from “I know RL” to “I understand RL derivations.”
+Reinforcement Learning: An Introduction
+
+Authors: Sutton & Barto
+
+Topics
+
+* Multi-Armed Bandits
+* Markov Decision Processes
+* Bellman Equations
+* Dynamic Programming
+* Monte Carlo Methods
+* Temporal Difference Learning
+* Q-Learning
+* Policy Gradients
+* Actor-Critic
+
+⸻
+
+Book 20
+
+Algorithms for Decision Making
+
+Authors: Kochenderfer, Wheeler, Wray
+
+Topics
+
+* Sequential decision making
+* Planning
+* MDPs
+* POMDPs
+
+⸻
+
+Book 21
+
+Algorithms for Reinforcement Learning
+
+Author: Csaba Szepesvári
+
+Topics
+
+* Policy optimization
+* Value functions
+* Control algorithms
 
 ⸻
 
 Volume 12: Deep Reinforcement Learning
 
-Now combine neural networks with RL.
+Goal
 
-22. Deep Reinforcement Learning Hands-On — Maxim Lapan
-
-Focus on:
-
-DQN
-Double DQN
-Dueling DQN
-Policy gradients
-A2C
-A3C
-PPO
-DDPG
-SAC
-Model-based RL
-
-Why it matters:
-
-You need to implement RL algorithms, not just read equations.
-
-This book is code-heavy, which is good.
+Combine neural networks and RL.
 
 ⸻
 
-23. Grokking Deep Reinforcement Learning — Miguel Morales
+Book 22
 
-Read this if Sutton and Barto feels too abstract.
+Deep Reinforcement Learning Hands-On
 
-Focus on:
+Author: Maxim Lapan
 
-Intuition
-MDPs
-Value methods
-Policy methods
-Actor-critic
-Deep Q-learning
-Policy gradients
+Topics
 
-Why it matters:
+* DQN
+* PPO
+* A2C
+* SAC
+* Actor-Critic
 
-It gives intuitive explanations before heavy theory.
+Expected Outcome
+
+Implement modern RL algorithms.
+
+⸻
+
+Book 23
+
+Grokking Deep Reinforcement Learning
+
+Author: Miguel Morales
+
+Goal
+
+Develop strong intuition for RL concepts.
 
 ⸻
 
 Volume 13: RL for LLMs
 
-There are not many perfect “books” here yet. This area is paper-heavy. But you should study it after RL foundations.
+Goal
 
-You need to understand this pipeline:
+Understand how ChatGPT-like systems are aligned.
+
+⸻
+
+Concepts
+
+RLHF
+
+Pipeline:
 
 Pretraining
-        ↓
-Supervised fine-tuning
-        ↓
-Preference data
-        ↓
-Reward model
-        ↓
-RLHF / PPO
-        ↓
-DPO / ORPO / GRPO / verifier-based training
-
-Book-adjacent resources to use here
-
-24. Hugging Face course/materials on RLHF and alignment
-
-Use these after you know transformers and basic RL.
-
-Focus on:
-
-Reward modeling
-Preference datasets
-PPO for language models
-KL penalty
-Reference model
-Policy model
-DPO
-Evaluation
+    ↓
+Supervised Fine-Tuning
+    ↓
+Reward Model
+    ↓
+PPO Optimization
 
 ⸻
 
-Papers to read after the RL books
+Study Papers
 
-Read these in this order:
-
-1. InstructGPT / Training language models to follow instructions with human feedback
-2. Learning to summarize from human feedback
-3. Direct Preference Optimization
-4. Constitutional AI
-5. RLAIF papers
-6. ORPO
-7. DeepSeekMath / GRPO-related work
-8. DeepSeek-R1
-
-The key idea:
-
-Traditional RL:
-
-state = environment observation
-action = move
-reward = environment score
-
-LLM RL:
-
-state = prompt/context
-action = generated response/tokens
-reward = human preference, reward model score, verifier score, or task correctness
+1. InstructGPT
+2. Learning to Summarize from Human Feedback
+3. Constitutional AI
+4. Direct Preference Optimization (DPO)
+5. ORPO
+6. DeepSeekMath
+7. DeepSeek-R1
 
 ⸻
 
-Volume 14: Mixture of Experts, Mixtral, and Advanced LLM Architectures
+Volume 14: Mixture-of-Experts and Mixtral
 
-For Mixtral-like models, you need three foundations:
+Goal
 
-Transformers
-Sparse computation
-Mixture-of-Experts routing
-Distributed training
-
-There is no single perfect book for MoE LLMs, so use papers after the transformer books.
-
-Books that help before MoE papers
-
-25. Designing Machine Learning Systems — Chip Huyen
-
-Focus on:
-
-ML systems
-Data distribution
-Training-serving skew
-Monitoring
-Deployment
-Continual learning
-ML pipelines
-
-Why it matters:
-
-LLMs are not just models. They are systems.
+Understand sparse expert architectures.
 
 ⸻
 
-26. Machine Learning Systems — Jeff Smith / Chip Huyen-style system resources
+Concepts
 
-Use ML systems resources to understand how models are trained, deployed, monitored, and scaled.
+Dense Models
+
+Every token uses every parameter.
+
+MoE Models
+
+Every token activates only a subset of experts.
 
 ⸻
 
-MoE papers to read
+Study Papers
 
-Read in this order:
-
-1. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer
+1. Sparsely Gated Mixture of Experts
 2. GShard
 3. Switch Transformers
 4. GLaM
 5. Mixtral of Experts
-6. DeepSeek-V2 / DeepSeek-V3 technical reports
-
-What you are trying to understand:
-
-Dense model:
-Every token uses every parameter.
-MoE model:
-Each token is routed to only a few experts.
-Example:
-Mixtral 8x7B may have many expert parameters,
-but each token activates only a subset.
-
-Core questions:
-
-How does the router choose experts?
-How is load balancing handled?
-Why does sparse activation reduce compute?
-Why is training MoE unstable?
-How does distributed expert parallelism work?
+6. DeepSeek-V2
+7. DeepSeek-V3
 
 ⸻
 
-Volume 15: Systems, GPUs, Kernels, and Distributed Training
+Volume 15: Systems and Infrastructure
 
-To really understand modern LLMs, you must eventually learn systems.
+Goal
 
-27. Computer Systems: A Programmer’s Perspective — Bryant and O’Hallaron
-
-Focus on:
-
-Memory hierarchy
-Caching
-Linking
-Processes
-Virtual memory
-Concurrency
-
-Why it matters:
-
-LLM inference speed depends heavily on memory movement, not just math.
+Understand how LLMs are trained and deployed.
 
 ⸻
 
-28. Programming Massively Parallel Processors — Hwu, Kirk, El Hajj
+Book 24
 
-Focus on:
+Computer Systems: A Programmer’s Perspective
 
-GPU architecture
-CUDA programming
-Threads
-Blocks
-Warps
-Memory coalescing
-Shared memory
-Parallel reductions
-Matrix multiplication
+Topics
 
-Why it matters:
-
-Training and inference are GPU problems.
-
-Attention, matmul, FlashAttention, quantization kernels, and batching only make sense when you understand GPUs.
+* Memory hierarchy
+* Virtual memory
+* Processes
+* Concurrency
 
 ⸻
 
-29. Distributed Machine Learning Patterns — Yuan Tang
+Book 25
 
-Focus on:
+Programming Massively Parallel Processors
 
-Data parallelism
-Model parallelism
-Pipeline parallelism
-Parameter servers
-Distributed training
-Fault tolerance
+Topics
 
-Why it matters:
-
-Large LLMs cannot be trained on one GPU.
-
-You need concepts like:
-
-Data parallelism
-Tensor parallelism
-Pipeline parallelism
-Expert parallelism
-ZeRO
-FSDP
-Checkpointing
+* CUDA
+* GPU architecture
+* Shared memory
+* Matrix multiplication
 
 ⸻
 
-The Actual Reading Order
+Book 26
 
-Here is the clean sequence I recommend.
+Distributed Machine Learning Patterns
 
-Stage 1: Core Math Foundation
+Topics
 
-Read in this order:
-
-1. How to Prove It — Velleman
-2. Introduction to Linear Algebra — Strang
-3. Calculus — Spivak
-4. Vector Calculus — Marsden & Tromba
-5. Introduction to Probability — Bertsekas & Tsitsiklis
-6. All of Statistics — Wasserman
-
-Outcome:
-
-You can understand gradients, probability distributions, loss functions, and model training.
+* Data parallelism
+* Tensor parallelism
+* Pipeline parallelism
+* Expert parallelism
 
 ⸻
 
-Stage 2: Deeper Math for AI
+Phase-Based Timeline
 
-7. Convex Optimization — Boyd & Vandenberghe
-8. Elements of Information Theory — Cover & Thomas
-9. Numerical Optimization — Nocedal & Wright
-10. Linear Algebra Done Right — Axler
+Months 1-3
 
-Outcome:
+* How to Prove It
+* Strang Linear Algebra
+* Probability
 
-You understand optimization, entropy, KL divergence, numerical stability, and deeper vector-space reasoning.
+Projects:
 
-⸻
-
-Stage 3: Machine Learning
-
-11. Pattern Recognition and Machine Learning — Bishop
-12. Elements of Statistical Learning — Hastie, Tibshirani, Friedman
-
-Outcome:
-
-You understand ML before deep learning.
+* Matrix multiplication
+* Softmax
+* Gradient descent
 
 ⸻
 
-Stage 4: Deep Learning
+Months 4-6
 
-13. Understanding Deep Learning — Simon Prince
-14. Deep Learning — Goodfellow, Bengio, Courville
+* Statistics
+* Optimization
+* Information Theory
 
-Outcome:
+Projects:
 
-You understand neural networks, backpropagation, regularization, optimization, and representation learning.
-
-⸻
-
-Stage 5: NLP and Transformers
-
-15. Speech and Language Processing — Jurafsky & Martin
-16. Natural Language Processing with Transformers — Tunstall, von Werra, Wolf
-17. Build a Large Language Model From Scratch — Sebastian Raschka
-
-Outcome:
-
-You can build a small GPT-like model and understand tokenization, embeddings, attention, transformer blocks, pretraining, and fine-tuning.
+* Linear regression
+* Logistic regression
+* Neural network from scratch
 
 ⸻
 
-Stage 6: Reinforcement Learning
+Months 7-9
 
-18. Reinforcement Learning: An Introduction — Sutton & Barto
-19. Algorithms for Decision Making — Kochenderfer, Wheeler, Wray
-20. Algorithms for Reinforcement Learning — Szepesvári
-21. Deep Reinforcement Learning Hands-On — Maxim Lapan
+* Deep Learning
+* Goodfellow
 
-Outcome:
+Projects:
 
-You understand MDPs, Bellman equations, Q-learning, policy gradients, actor-critic, PPO, and deep RL.
-
-⸻
-
-Stage 7: LLM Post-Training and Alignment
-
-No single perfect book exists yet. Use papers and practical resources.
-
-Read:
-
-22. InstructGPT paper
-23. Learning to Summarize from Human Feedback
-24. Constitutional AI
-25. Direct Preference Optimization
-26. ORPO
-27. DeepSeek-R1
-28. DeepSeek-V3 technical report
-
-Outcome:
-
-You understand RLHF, reward models, PPO, DPO, ORPO, GRPO-style reasoning training, and verifier-based learning.
+* Backpropagation
+* CNN
+* Adam optimizer
 
 ⸻
 
-Stage 8: MoE, Mixtral, and Modern Architectures
+Months 10-12
 
-Read:
+* NLP
+* Transformers
+* Raschka LLM Book
 
-29. Outrageously Large Neural Networks
-30. GShard
-31. Switch Transformers
-32. GLaM
-33. Mixtral of Experts
-34. DeepSeek-V2 / V3 reports
+Projects:
 
-Outcome:
-
-You understand sparse expert routing, load balancing, expert parallelism, and why MoE models are powerful.
+* Tokenizer
+* Attention
+* Transformer
+* GPT
 
 ⸻
 
-Stage 9: Systems
+Months 13-15
 
-35. Computer Systems: A Programmer’s Perspective
-36. Programming Massively Parallel Processors
-37. Distributed Machine Learning Patterns
+* Sutton & Barto
+* Deep RL
 
-Outcome:
+Projects:
 
-You understand GPU memory, kernels, CUDA, distributed training, parallelism, inference bottlenecks, and why serving LLMs is a systems problem.
-
-⸻
-
-A Practical 18-Month Plan
-
-Months 1–3: Math Core
-
-How to Prove It
-Strang Linear Algebra
-Bertsekas Probability
-Basic calculus review
-
-Main goal:
-
-Understand vectors, matrices, probability, derivatives.
-
-Build small notebooks:
-
-Matrix multiplication from scratch
-Gradient descent from scratch
-Softmax from scratch
-Cross-entropy from scratch
+* Q-Learning
+* DQN
+* PPO
 
 ⸻
 
-Months 4–6: Optimization + Statistics + Information Theory
+Months 16-18
 
-All of Statistics
-Boyd Convex Optimization
-Cover & Thomas selected chapters
+* RLHF
+* DPO
+* Mixtral
+* DeepSeek
 
-Main goal:
+Projects:
 
-Understand why models minimize loss and how learning is statistical estimation.
-
-Build:
-
-Linear regression from scratch
-Logistic regression from scratch
-Tiny neural network from scratch
-Backpropagation manually
+* Reward model
+* DPO implementation
+* Tiny MoE model
+* RLHF pipeline
 
 ⸻
 
-Months 7–9: Deep Learning
+End Goal
 
-Understanding Deep Learning
-Deep Learning — Goodfellow et al.
+After completing this roadmap, you should be able to:
 
-Main goal:
-
-Understand deep networks, backprop, optimizers, regularization, and representation learning.
-
-Build:
-
-MLP from scratch
-CNN in PyTorch
-Autograd experiments
-Adam optimizer from scratch
-
-⸻
-
-Months 10–12: Transformers and LLMs
-
-NLP with Transformers
-Build a Large Language Model From Scratch
-Speech and Language Processing selected chapters
-
-Main goal:
-
-Build your own small GPT.
-
-Build:
-
-Tokenizer
-Embedding layer
-Self-attention
-Multi-head attention
-Transformer block
-Tiny GPT
-Pretraining loop
-Instruction fine-tuning loop
-
-⸻
-
-Months 13–15: Reinforcement Learning
-
-Sutton & Barto
-Algorithms for Decision Making
-Deep RL Hands-On
-
-Main goal:
-
-Understand RL from bandits to PPO.
-
-Build:
-
-Multi-armed bandit
-Gridworld
-Q-learning
-DQN
-Policy gradient
-Actor-critic
-PPO
-
-⸻
-
-Months 16–18: RLHF, MoE, and Systems
-
-Read papers:
-
-InstructGPT
-DPO
-ORPO
-DeepSeek-R1
-Switch Transformer
-Mixtral
-FlashAttention
-ZeRO
-Megatron-LM
-
-Build:
-
-Reward model toy example
-DPO training on preference pairs
-Tiny MoE layer
-Router + expert load balancing
-Tiny RLHF-style PPO loop
-
-⸻
-
-What To Skip Initially
-
-Do not start with these too early:
-
-Information Geometry
-Measure Theory
-Advanced statistical learning theory
-CUDA kernels
-Distributed training
-MoE papers
-RLHF papers
-
-They are valuable, but only after the foundation.
-
-Otherwise, you will recognize words but not understand mechanisms.
-
-⸻
-
-The Most Important “Minimum Stack”
-
-If you want the shortest serious path, do this:
-
-1. Strang — Introduction to Linear Algebra
-2. Bertsekas — Introduction to Probability
-3. Wasserman — All of Statistics
-4. Boyd — Convex Optimization
-5. Prince — Understanding Deep Learning
-6. Goodfellow — Deep Learning
-7. Jurafsky & Martin — Speech and Language Processing
-8. Raschka — Build a Large Language Model From Scratch
-9. Sutton & Barto — Reinforcement Learning
-10. Lapan — Deep Reinforcement Learning Hands-On
-11. InstructGPT, DPO, Mixtral, DeepSeek-R1 papers
-
-This is the best compressed route.
-
-⸻
-
-My Recommendation for You Specifically
-
-Given your background as an AI developer and your interest in GraphRAG, agents, Jarvis-like systems, Highcharts agents, and LLM OS ideas, I would not study this like a traditional student.
-
-Use this pattern:
-
-Math concept → tiny implementation → LLM/RL connection → paper
-
-Example:
-
-Matrix multiplication
-→ implement it
-→ connect to embeddings and attention
-→ read Attention Is All You Need
-
-Another example:
-
-KL divergence
-→ implement it
-→ connect to RLHF KL penalty
-→ read InstructGPT
-
-Another:
-
-Policy gradient
-→ implement REINFORCE
-→ connect to PPO
-→ connect to RLHF
-
-This will make the books stick much more deeply.
+* Read LLM papers comfortably
+* Understand transformer internals
+* Build GPT-like models
+* Understand Mixtral and MoE routing
+* Understand RLHF, PPO, DPO, ORPO, GRPO
+* Build reinforcement learning agents
+* Understand distributed training
+* Understand GPU optimization
+* Design advanced agentic AI systems
+* Build a Jarvis-like Cognitive Operating System
