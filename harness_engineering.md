@@ -1,9 +1,11 @@
 # Loop Engineering, Harness Engineering & Agentic Middleware Engineering
 ### A Complete Learning Curriculum (Table of Contents + Resources per Concept)
 
-> **The one-line thesis:** `Agent = Model + Harness`. The model is roughly fixed; almost everything you can actually engineer lives in the layer *around* it. LangChain's DeepAgent jumped **13.7 points on Terminal-Bench 2.0 (52.8% → 66.5%) by changing only the harness — same model**. That gap is the entire discipline.
+> **The one-line thesis:** `Agent = Model + Harness`. Holding the model fixed reveals how much engineering leverage lives in the layer *around* it. LangChain's DeepAgent jumped **13.7 points on Terminal-Bench 2.0 (52.8% → 66.5%) by changing only the harness — same model**. That gap is a large part of the discipline, though not the whole story.
 >
 > **How to read this document:** Concepts are ordered as a learning path. Each concept has (a) a one-paragraph "what it is," and (b) the canonical blog/paper/repo to learn it from. **Part 0** is **Loop Engineering** (the practitioner methodology — designing the *system* that prompts agents, not the prompts themselves). **Part I** is **Harness Engineering** (the agent runtime + the repo/context scaffold around a coding agent like Claude Code or Codex). **Part II** is **Agentic Middleware Engineering** (the programmable interception layer *inside* the loop — context, routing, guardrails, observability). **Part III** is the study plan. Loop Engineering is *why* you build the harness; Harness Engineering is *what* you build; Middleware Engineering is *how* the cross-cutting concerns get implemented.
+>
+> **Calibration note:** The result above demonstrates harness leverage while holding one model fixed; it does **not** mean models are interchangeable or that a harness can compensate for inadequate base capability. A precise working model is: `agent behavior = model + assembled context + tools + execution environment + feedback/verifiers + loop control`. The harness is where those components become a reliable system.
 
 ---
 
@@ -141,23 +143,250 @@ Loop engineering fails loudly — and expensively — if failure modes are not e
 
 ## 1. Foundations & Mental Model
 
+> **Learning goal.** By the end of this chapter, you should be able to look at any “agent” product and separate six things that are often blurred together: the model, the current context, the loop controller, the tool surface, the execution environment, and the verifier. You should also be able to draw the core loop from memory and explain why a model that writes good code can still produce an unreliable coding agent.
+
 ### 1.1 Why the harness is the job
-The counterintuitive core finding: model swaps matter less than harness design. 84% of developers use AI tools but only ~29% trust the output; closing that trust gap is harness work. Start here to internalize *why* this discipline exists.
-- **Blog:** *Agentic Harness Engineering: LLMs as the New OS* — Decoding AI. https://www.decodingai.com/p/agentic-harness-engineering
-- **Blog (reading-path overview):** *The Complete Claude Code Harness Engineering Guide (5 Layers, 8 Deep-Dives)* — DEV. https://dev.to/shipwithaiio/the-complete-claude-code-harness-engineering-guide-5-layers-8-deep-dives-3d4j
-- **Definitional companion:** *Claude Code Harness and Environment Engineering* — hidekazu-konishi.com (splits the discipline into *harness engineering* = the runtime, and *environment engineering* = bounding the world). https://hidekazu-konishi.com/entry/claude_code_harness_and_environment_engineering_guide.html
+The slogan `Agent = Model + Harness` is directionally right, but it is a compression. A more precise practical equation is:
+
+```text
+Agent behavior
+  = model capability
+  + assembled context
+  + available tools and their interfaces
+  + execution environment and permissions
+  + feedback and verification
+  + control logic for retry, stop, escalation, and memory
+```
+
+A model is a conditional generator: given the tokens and tool schemas in its current context, it proposes the next tokens or a tool call. It does **not** inherently know which repository it is in, which files matter, whether a shell command is safe, whether its code compiles, whether it should retry, or whether its answer has met the real requirement. Those are system responsibilities.
+
+The harness is the surrounding runtime that turns a model call into a controlled sequence of **observe → decide → act → receive feedback → continue, stop, or escalate**. This is why two agents using the same model can have dramatically different reliability.
+
+| Same base model, different system | Weak harness | Strong harness |
+|---|---|---|
+| Initial context | “Fix the authentication bug.” | Issue, scoped repo instructions, relevant test commands, environment state, and tool descriptions. |
+| Action surface | Text response only or vague tools. | Search, read, edit, shell, tests, version control, and domain tools with clear contracts. |
+| Safety | Prompt asks the model not to do dangerous things. | Sandboxed execution, least-privilege credentials, policy gates, and approval checkpoints. |
+| Feedback | Model self-declares completion. | Unit tests, integration tests, linters, security checks, schema checks, or human review. |
+| Failure recovery | One incorrect answer ends the run. | Retry policies, loop detection, structured errors, rollback, and escalation. |
+| Learning from runs | Conversation disappears. | Durable traces, plans, checkpoints, memory, and evaluated skill updates. |
+
+The model supplies general capability. The harness converts that capability into bounded, inspectable, task-specific behavior. The harness is therefore not “extra plumbing.” It determines what world the model sees, what actions it can attempt, what consequences it can cause, and what evidence can prove it succeeded.
+
+#### Do not overcorrect: the model still matters
+Harness engineering is not a claim that models are commodities. A harness cannot reliably rescue a model that cannot follow instructions, select tools, interpret tool output, write valid code, recover after failure, or use relevant instructions. What harness work does is prevent capable models from wasting ability through missing context, poorly designed tools, unverified outputs, permissive environments, or unbounded loops.
+
+The DeepAgents Terminal-Bench result in this curriculum is a useful example. Holding a model fixed, changes to environment context, verification behavior, loop detection, and reasoning-budget policy materially changed task success. That demonstrates that the **system around the model** can be a high-leverage variable. It does not demonstrate that the model is unimportant.
+
+#### Six neighboring disciplines, separated cleanly
+
+| Discipline | Primary question | Typical artifact | What it cannot guarantee by itself |
+|---|---|---|---|
+| **Prompt engineering** | What should I tell the model to do? | System prompt, task instruction, few-shot examples. | That the instruction will be followed or safely enforced. |
+| **Context engineering** | What information should be present in the finite context window now? | Context builder, retrieval policy, compaction, summaries, memory selection. | That the model can act on the information or that actions are safe. |
+| **Harness engineering** | How do I execute and govern the model-tool-feedback loop? | Loop controller, tool runtime, state, policies, validators, traces. | That the underlying model has enough capability for the task. |
+| **Environment engineering** | What can the running agent actually touch? | Container/VM, filesystem mounts, network rules, IAM, secrets policy. | That the model chooses the correct action within the allowed boundary. |
+| **Middleware engineering** | Where do cross-cutting policies alter the loop? | Before/after model and tool hooks, routing, trimming, guardrails, logging. | That the whole agent architecture is well designed. |
+| **Loop engineering** | What trigger, state check, verifier, and exit rule make this a useful autonomous process? | Orchestration plan, stop conditions, eval gates, escalation policy. | That every underlying component is implemented correctly. |
+
+A helpful enforcement ladder is:
+
+```text
+Instruction in AGENTS.md      = advice the model may ignore
+Pre-tool policy / hook        = harness enforcement before execution
+Read-only mount / no network  = environment enforcement the model cannot bypass
+```
+
+This is why a prompt that says “do not touch production” is never the final safety mechanism. A reliable design makes the dangerous resource unavailable or requires an approval boundary before the action runs.
+
+#### What to read for this section
+- **Primary (OpenAI):** *Harness engineering: leveraging Codex in an agent-first world.* This is the best practitioner account of how the human engineering role shifts from writing every line to increasing agent legibility, specifying intent, and building feedback loops. https://openai.com/index/harness-engineering/
+- **Primary (Anthropic):** *Building Effective Agents.* Use it for the workflow-versus-agent distinction and the augmented-LLM mental model. https://www.anthropic.com/research/building-effective-agents
+- **Primary (Anthropic):** *Effective context engineering for AI agents.* Use it for the definition of context as the finite set of tokens present at inference and the shift from prompt wording to managing the entire context state. https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
+- **Survey (new):** *Code as Agent Harness: Toward Executable, Verifiable, and Stateful Agent Systems.* A useful 2026 survey that treats code as the operational substrate for agent reasoning, action, environment modeling, and execution-based verification. https://arxiv.org/abs/2605.18747
+- **Survey (new):** *Externalization in LLM Agents: A Unified Review of Memory, Skills, Protocols and Harness Engineering.* A systems-level frame: memory externalizes state across time, skills externalize procedure, protocols externalize coordination structure, and the harness coordinates them into governed execution. https://arxiv.org/abs/2604.08224
 
 ### 1.2 The agentic loop (the irreducible core)
-Every coding agent is a surprisingly simple `while (tool_calls) { call model → run tools → append results }` loop. "Agentic" behavior *emerges* from repetition, not from a planning engine. Understand this before anything else.
-- **Primary (OpenAI):** *Unrolling the Codex agent loop* — exact request construction, message roles, turn semantics. https://openai.com/index/unrolling-the-codex-agent-loop/
-- **Primary (Anthropic foundations):** *Building Effective Agents* — workflows vs. agents, when to use each, orchestrator-workers, evaluator-optimizer. https://www.anthropic.com/research/building-effective-agents
-- **Deep dive (cross-tool):** *Inside the Agent Harness: How Codex and Claude Code Actually Work* — turn.rs pseudocode, compaction, token heuristics. https://medium.com/jonathans-musings/inside-the-agent-harness-how-codex-and-claude-code-actually-work-63593e26c176
-- **Repo (read the source):** `openai/codex` — the open-sourced Codex CLI (Rust); read `codex-rs/`. https://github.com/openai/codex
+At its core, an agent is a repeated state transition:
 
-### 1.3 The architecture of a real harness (Claude Code, dissected)
-Claude Code runs a `while(tool_call)` loop with ~8 core tools (Bash, Read, Edit, Write, Grep, Glob, Task/sub-agents, TodoWrite) — no RAG, no DAG. Anthropic dropped semantic embedding search in favor of grep-based agentic search. Study this as the reference implementation.
-- **Repo/guide:** *claude-code-ultimate-guide* — architecture.md is a verified technical dissection. https://github.com/FlorianBruniaux/claude-code-ultimate-guide/blob/main/guide/core/architecture.md
-- **Comparative source analysis:** *OpenAI Codex CLI Architecture and Multi-Runtime Agent Patterns* — Zylos (bubblewrap sandbox, execpolicy DSL, two-phase memory, app-server JSON-RPC; side-by-side with Claude Code). https://zylos.ai/research/2026-03-26-openai-codex-cli-architecture-multi-runtime-patterns/
+```text
+state at time t
+  → assemble context
+  → model chooses a response or tool action
+  → execute action under policy and sandbox
+  → receive an observation
+  → update state
+  → repeat or terminate
+```
+
+In compact form:
+
+```text
+while not terminal:
+    context = assemble_context(state)
+    response = model(context, available_tools)
+
+    if response is a final answer:
+        verdict = verify(response, state)
+        if verdict.passed:
+            return response
+        state.add(verdict.feedback)
+        continue
+
+    for tool_call in response.tool_calls:
+        decision = policy_gate(tool_call, state)
+        if decision.requires_approval:
+            return escalate(tool_call)
+        if decision.denied:
+            state.add(decision.reason)
+            continue
+
+        observation = sandbox.execute(tool_call)
+        trace.record(tool_call, observation)
+        state.add(observation)
+
+    if budget_exhausted(state) or loop_detected(state):
+        return stop_or_escalate(state)
+```
+
+This pseudo-code contains nearly every major topic in the rest of the curriculum:
+
+- `assemble_context` leads to repo instructions, skills, retrieval, memory, compaction, and context middleware.
+- `available_tools` leads to tool design, MCP, tool schemas, and programmatic tool calling.
+- `policy_gate` and `sandbox.execute` lead to permissions, hooks, approvals, sandboxing, and containment.
+- `verify` leads to tests, CI, graders, human checkpoints, and eval-driven improvement.
+- `trace.record` leads to observability, failure diagnosis, and self-evolving harnesses.
+- `budget_exhausted` and `loop_detected` lead to controlled autonomy rather than runaway iteration.
+
+#### Turn, loop, task, and session are different units
+These terms are easy to blur:
+
+- A **model call** is one inference request.
+- A **tool step** is one attempted action plus its observation.
+- A **loop iteration** is a model decision followed by zero or more tool steps.
+- A **task** is the user goal, such as “fix this bug.”
+- A **session** is the persistent record of task state, messages, observations, plans, artifacts, and checkpoints that may span multiple context windows.
+
+A coding agent may take dozens of model calls and hundreds of tool steps to complete one task. The main output may not be the final chat message. It may be a changed file, a commit, an updated deployment manifest, or a passing test suite.
+
+#### Codex is a concrete reference implementation
+OpenAI’s *Unrolling the Codex agent loop* makes the abstract loop tangible. Before the first inference call, Codex constructs an input from model instructions, tool definitions, sandbox and approval information, repository instructions such as `AGENTS.md`, configured skill metadata, local environment information, and the user’s message. When the model emits a tool call, Codex executes it, appends the observation into the next request, and samples the model again. The sequence continues until the model returns an assistant message instead of another tool call.
+
+The same article exposes two engineering constraints that explain why harness design is substantive:
+
+1. **Context growth:** tool results, plans, errors, and history can consume the finite context window. The harness needs compaction and memory strategies.
+2. **Inference cost and latency:** repeated calls are expensive. Stable prompt prefixes, tool ordering, cache behavior, and configuration changes can materially affect performance.
+
+That is why the loop is not just `while(tool_calls)`. It is a resource-constrained control system.
+
+#### Workflows versus agents
+Anthropic makes a useful architectural distinction:
+
+- **Workflows** use LLMs and tools through predefined code paths. The system determines the sequence.
+- **Agents** let the model dynamically direct its own process and tool usage. The model determines much of the sequence.
+
+Neither is universally better. Use workflows when the path is known, precision matters, and the cost of wandering is high. Use agents when the path cannot be predicted in advance and the system needs flexible tool selection or exploration. A closed loop can include agentic substeps while still having deterministic gates around them.
+
+#### What to read for this section
+- **Primary (OpenAI, essential):** *Unrolling the Codex agent loop.* Read it slowly. It shows prompt construction, tool execution, message roles, caching constraints, and compaction as concrete runtime mechanisms. https://openai.com/index/unrolling-the-codex-agent-loop/
+- **Primary (Anthropic):** *Building Effective Agents.* Focus on the distinction between workflows and agents, plus the orchestrator-workers and evaluator-optimizer patterns. https://www.anthropic.com/research/building-effective-agents
+- **Foundational paper:** *ReAct: Synergizing Reasoning and Acting in Language Models.* The thought/action/observation pattern is the academic ancestor of this loop. https://arxiv.org/abs/2210.03629
+- **Source code:** `openai/codex`. Read the code only after the OpenAI article, so the source has a mental map around it. https://github.com/openai/codex
+
+### 1.3 The architecture of a real harness
+A production harness is easiest to reason about as three interacting planes.
+
+```text
+                         CONTROL PLANE
+         session state · context assembly · policies · budgets
+       retries · stopping rules · memory · approvals · middleware
+                                  │
+                                  ▼
+                          MODEL PLANE
+          inference · tool selection · planning · response generation
+                                  │ tool calls
+                                  ▼
+                    EXECUTION + FEEDBACK PLANE
+     tools · MCP · shell · filesystem · APIs · sandbox · tests · graders
+     traces · logs · checkpoints · artifacts · human review decisions
+                                  │ observations
+                                  └─────────────── back to CONTROL PLANE
+```
+
+The model plane is important, but it is only one plane. Most production reliability work occurs in the control and execution-feedback planes.
+
+| Component | Core responsibility | Failure when poorly designed |
+|---|---|---|
+| **Context assembler** | Chooses which instructions, files, memories, tool schemas, and observations enter the next call. | The agent never sees the requirement, sees too much irrelevant material, or follows stale instructions. |
+| **Tool interface** | Defines actions with names, arguments, examples, output formats, errors, and side effects. | The model selects the wrong tool or produces malformed arguments. |
+| **Tool executor** | Actually performs the action and returns a usable observation. | Tool output is missing, ambiguous, unstructured, or detached from the relevant state. |
+| **Policy / permission gate** | Allows, denies, redirects, or requests approval for actions. | The agent can perform destructive, costly, or prohibited actions. |
+| **Environment boundary** | Enforces filesystem, network, process, credential, and runtime isolation. | A hallucination or prompt injection has a large blast radius. |
+| **Verifier** | Tests whether the system has achieved the real success condition. | The agent says “done” while the code fails or the task requirement is unmet. |
+| **Trace and observability layer** | Preserves the evidence needed to inspect and improve behavior. | A harness bug, tool outage, model failure, and sandbox failure all look the same. |
+
+#### The verifier is the trust boundary
+A model’s declaration that it is finished is only a candidate completion. The harness should decide whether that completion is accepted.
+
+For a coding task, a verifier could include:
+
+```text
+required tests pass
+AND formatter/linter passes
+AND changed files stay within scope
+AND no prohibited dependency or secret is introduced
+AND task-specific acceptance checks pass
+```
+
+For a company-profiling agent, a verifier could require:
+
+```text
+every required profile field is present
+AND every non-null claim has an evidence pointer
+AND document-derived facts are separated from web-derived facts
+AND unsupported values are explicitly marked unknown
+AND low-confidence inferences enter a human-review queue
+```
+
+The point is not that every task needs an enormous eval suite. The point is that “done” should be made as mechanical as the task allows. Deterministic verification is generally cheaper and more reliable than asking another model whether the first model did a good job.
+
+#### Claude Code and the “no RAG” misconception
+The useful claim is not that Claude Code does no retrieval. It does. The more accurate claim is:
+
+> Coding agents need not rely on a traditional, precomputed vector-RAG index to discover repository context. They can use agent-directed filesystem retrieval such as globbing, grep, symbol search, file reading, and shell commands, then choose the next retrieval action based on the results.
+
+Compare the two patterns:
+
+```text
+Traditional repository RAG
+repo → chunk → embed → index → retrieve top-k chunks → model
+
+Agent-directed filesystem retrieval
+model sees task → searches paths/symbols → opens evidence → updates hypothesis
+               → searches again only where needed → edits/tests
+```
+
+Pre-indexed retrieval can be fast and useful, particularly for large or static collections. Agent-directed retrieval can be adaptive and fresh because the agent explores the live repository. In practice, robust systems often use a hybrid: stable instructions and high-value architecture context up front, then just-in-time search for task-specific evidence.
+
+Do not treat precise tool counts, undocumented compaction thresholds, or internal Claude Code implementation details from third-party guides as permanent facts. Harness internals change quickly. Prefer first-party documentation for behavior guarantees and use source analyses as learning aids.
+
+#### New research that sharpens the Chapter 1 mental model
+- **Code as Agent Harness (2026):** proposes a three-layer view: harness interface, harness mechanisms (planning, memory, tool use, feedback control), and harness scaling to multi-agent systems. Its open problems are exactly the right next questions: evaluation beyond final success, incomplete feedback, regression-free improvement, shared state, human oversight, and multimodal environments. https://arxiv.org/abs/2605.18747
+- **Harnesses for Inference-Time Alignment over Execution Trajectories (2026):** argues that more decomposition and guidance are not automatically better. It separates harnesses into task decomposition and guided execution, then highlights over-decomposition, over-pruning, and hallucinated execution as real failure modes. https://arxiv.org/abs/2605.21516
+- **A Benchmark for Context Retrieval in Coding Agents / ContextBench (2026):** measures not only final task completion but process-level context recall, precision, and efficiency. This motivates a critical distinction: *context retrieved* is not necessarily *context used correctly*. https://arxiv.org/abs/2602.05892
+
+#### Chapter 1 mastery check
+Before moving to the repo-side scaffold, make sure you can answer these without notes:
+
+1. Why is “model says it is finished” not a sufficient stop condition?
+2. What is the difference between a tool schema, a tool executor, and a sandbox?
+3. Which parts of a coding agent determine what it can **see**, what it can **do**, and what it can **change**?
+4. Why is a policy written in `AGENTS.md` weaker than a pre-tool approval hook, and why is a hook weaker than an environment-level capability boundary?
+5. Why can a fixed model perform better under one harness than another without implying that the model is unimportant?
+6. Why is adaptive repository navigation still retrieval, even when no vector database is present?
+
+**Deliverable:** Draw the three-plane architecture for one agent you want to build. For every box, name one likely failure mode and one observable signal that would reveal it.
+
 
 ---
 
@@ -291,6 +520,21 @@ Static context strategies can't adapt as accumulated context's usefulness shifts
 - **Paper:** *AgentSwing: Adaptive Parallel Context Management Routing for Long-Horizon Web Agents*. https://arxiv.org/pdf/2603.27490
 - **Paper (terminal-agent scaffolding/context survey):** *Building Effective AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering*. https://arxiv.org/pdf/2603.05344
 
+### 8.4 Active context management is becoming an agent action (research update)
+The next step beyond automatic compaction is to treat working-memory management as an explicit, evaluable part of the loop. The agent or its middleware decides whether to preserve, compress, skip, roll back, excerpt, or delete context. This changes the question from “When should we summarize?” to “What state should the agent carry forward, at what fidelity, and why?”
+
+This research cluster adds four important distinctions:
+
+1. **Retrieved context is not the same as used context.** A coding agent can search the correct file yet ignore the critical information when it edits. Context quality therefore needs process-level evaluation, not only final task success.
+2. **Persistent state should be externalized.** Long-horizon agents need a durable workspace or state abstraction, rather than a giant conversation transcript that grows forever.
+3. **Context-management strategies themselves can become skills.** The policy that decides what to keep, summarize, or discard may be learned and improved from trajectory evidence.
+4. **Context operations have failure modes.** Compressing too aggressively loses evidence; keeping everything causes distraction and cost; rollback can revive useful branches but can also reintroduce stale assumptions.
+
+- **Paper:** *A Benchmark for Context Retrieval in Coding Agents (ContextBench).* Tracks retrieval recall, precision, and efficiency over coding-agent trajectories. Use it to learn why “the agent saw the file” does not prove it used the file correctly. https://arxiv.org/abs/2602.05892
+- **Paper:** *Meta Context Engineering via Agentic Skill Evolution.* Co-evolves context-engineering skills with the context files/code those skills manipulate. https://arxiv.org/abs/2601.21557
+- **Paper:** *InfiAgent: An Infinite-Horizon Framework for General-Purpose Autonomous Agents.* Externalizes durable state into a file-centric workspace and rebuilds a bounded reasoning context from a state snapshot plus recent actions. https://arxiv.org/abs/2601.03204
+- **Paper:** *LongSeeker: Elastic Context Orchestration for Long-Horizon Search Agents.* Introduces Context-ReAct operations such as Skip, Compress, Rollback, Snippet, and Delete. https://arxiv.org/abs/2605.05191
+
 ---
 
 ## 9. Routing & Model-Selection Middleware
@@ -331,6 +575,41 @@ Generate realistic eval tasks, measure tool-use accuracy + token/latency/error m
 - **Primary (Anthropic):** *Writing effective tools for AI agents* (+ tool-evaluation cookbook). https://www.anthropic.com/engineering/writing-tools-for-agents
 - **Primary (OpenAI):** *OpenAI for Developers in 2025* (evals, graders, tuning maturing into a repeatable loop). https://developers.openai.com/blog/openai-for-developers-2025
 
+### 11.3 Evaluating a self-evolving harness: improvement is a release, not one score (research update)
+A self-modifying harness should be treated like a production release candidate, not like a prompt experiment. A higher score on the latest batch can hide overfitting, regression on earlier tasks, a cost explosion, or an intermediate harness version that is better than the final one.
+
+A serious evaluation bundle should include:
+
+```text
+training tasks used to propose an update
+→ frozen update-validation tasks
+→ held-out in-domain tasks
+→ held-out transfer / out-of-domain tasks
+→ replay tasks for regression detection
+→ token, latency, tool-error, and cost records
+→ saved harness snapshot and rollback path
+```
+
+- **Paper:** *SEAGym: An Evaluation Environment for Self-Evolving LLM Agents.* Builds this release-like evaluation perspective around train, validation, test, replay, transfer, cost, and snapshot records. https://arxiv.org/abs/2606.17546
+- **Paper:** *Harness Updating Is Not Harness Benefit.* Separates the ability to create a harness update from the ability of a task-solving agent to benefit from that update later. This is a crucial warning: a skill or prompt may look good in isolation yet fail to be retrieved, followed, or useful for the receiving model. https://arxiv.org/abs/2605.30621
+
+### 11.4 Diagnose before mutating the harness (research update)
+When an agent fails, “rewrite the system prompt” is a poor default. A failed trajectory may originate in a context-selection error, a malformed tool contract, a permission denial, a stale memory item, an execution-environment issue, a missing verifier, or a model limitation. Broad changes can mask the cause and create regressions.
+
+The more mature loop is:
+
+```text
+trace → localize the responsible step and harness layer
+      → state a falsifiable diagnosis
+      → apply a scoped patch
+      → evaluate against target failures and regression suite
+      → promote, revert, or continue investigating
+```
+
+- **Paper:** *From Failed Trajectories to Reliable LLM Agents: Diagnosing and Repairing Harness Flaws (HarnessFix).* Uses trace-grounded diagnosis, a harness-aware intermediate representation, and scoped repair operators rather than broad blind mutation. https://arxiv.org/abs/2606.06324
+- **Paper:** *Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses.* Frames each harness edit as a falsifiable contract, supported by component, experience, and decision observability. https://arxiv.org/abs/2604.25850
+- **Paper:** *Retrospective Harness Optimization: Improving LLM Agents via Self-Preference over Trajectory Rollouts.* Explores selecting and improving harness updates from prior trajectories without a separately labeled validation set; study it together with SEAGym, which explains why independent frozen evaluation still matters. https://arxiv.org/abs/2606.05922
+
 ---
 
 # PART IV — THE AUTONOMOUS FUTURE: SELF-GENERATING SKILLS, TOOLS & AGENTS
@@ -357,6 +636,23 @@ Together, these papers define the two frontiers: *skill evolution from task expe
 
 - **Paper:** *Skill-MAS: Evolving Meta-Skill for Automatic Multi-Agent Systems* — Lin, Yang, Qin (HKUST/Ant Group), arXiv:2606.18837. https://arxiv.org/abs/2606.18837
 - **Paper:** *Automating SKILL.md Generation for Computer-Using Agents via Interaction Trajectory Mining* — Hao, Li (MIT/Harvard), arXiv:2606.20363. https://arxiv.org/abs/2606.20363
+
+### 12.3 A critical distinction: harness updating ≠ harness benefit (new research)
+Self-evolving-agent papers can create an overly simple story: a strong agent reflects on trajectories, writes a better skill/prompt/tool workflow, and the next agent performs better. Recent evidence suggests there are two distinct capabilities:
+
+1. **Harness updating:** producing an artifact that is objectively useful when evaluated as a harness change.
+2. **Harness benefit:** allowing a downstream task-solving agent to retrieve, understand, activate, and follow that artifact at the right moment.
+
+The two are not guaranteed to move together. A generated `SKILL.md` may be readable, technically sensible, and even improve a controlled evaluator, yet still fail in deployment because the receiving agent does not select it, misapplies it, or is distracted by it. The practitioner consequence is that every evolving resource requires two tests:
+
+```text
+Is this artifact good?
+AND
+Does the deployed agent use it correctly on new tasks?
+```
+
+- **Paper (essential calibration):** *Harness Updating Is Not Harness Benefit: Disentangling Evolution Capabilities in Self-Evolving LLM Agents.* https://arxiv.org/abs/2605.30621
+- **Cross-reference:** §11.3 for frozen validation, replay, transfer, and cost evaluation; §16.3 for the related Auto-SKILL.md lesson that readable structure does not automatically transfer.
 
 ---
 
@@ -462,6 +758,27 @@ Treat automated skill generation like AI-generated code: useful, often correct i
 - **Paper:** Auto-SKILL.md (§12.2). The negative result section is the most important read. https://arxiv.org/abs/2606.20363
 - **Cross-reference:** §0.6 (failure modes of loops), §11.2 (eval-driven improvement).
 
+### 16.4 The missing operational layer: versioned resources, promotion, and rollback
+As prompts, skills, tools, memory schemas, environments, and subagents become editable resources, they need lifecycle management just as code does. A generated capability should have an identifier, owner, version, provenance, evaluation record, scope of permissions, promotion status, and rollback path.
+
+Treat a new generated tool or skill as a pull request:
+
+```text
+proposal
+→ static review and permission review
+→ sandbox evaluation
+→ frozen regression suite
+→ staged promotion
+→ trace-backed monitoring
+→ rollback or deprecation if it harms reliability
+```
+
+This prevents an autonomous agent from silently accumulating an opaque pile of prompts, tool wrappers, and memory artifacts whose effects nobody can reconstruct.
+
+- **Paper:** *Autogenesis: A Self-Evolving Agent Protocol.* Models prompts, agents, tools, environments, memory, and outputs as versioned resources with explicit lifecycle state, plus propose/assess/commit/rollback interfaces. https://arxiv.org/abs/2604.15034
+- **Survey:** *Externalization in LLM Agents.* Useful for seeing memory, skills, protocols, and harnesses as coupled forms of externalized capability rather than unrelated features. https://arxiv.org/abs/2604.08224
+- **Cross-reference:** §5 for the sandbox boundary, §10 for approval interrupts, and §11.3 for release-grade evaluation.
+
 ---
 
 # PART III — THE LEARNING PLAN
@@ -470,7 +787,7 @@ Treat automated skill generation like AI-generated code: useful, often correct i
 
 **Week 0 — Loop Engineering methodology.** Read §0.1–0.4. Read Tosea.ai and AI Builder Club. Deliverable: for one repetitive task, write down the trigger, state check, exit condition, and open/closed choice — before writing any code.
 
-**Week 1 — Mental model.** Read §1.1–1.3. Read Anthropic *Building Effective Agents* and OpenAI *Unrolling the Codex agent loop* cover to cover. Deliverable: write the `while(tool_call)` loop from memory in ~30 lines of pseudocode.
+**Week 1 — Mental model.** Read the expanded §1.1–1.3. Read Anthropic *Building Effective Agents* and OpenAI *Unrolling the Codex agent loop* cover to cover. Deliverable: write the `while(tool_call)` loop from memory in ~30 lines of pseudocode, draw the three-plane harness architecture, and name one failure mode plus one observable signal for each plane.
 
 **Week 2 — Read the source.** Clone `openai/codex`, skim `codex-rs/`, read claude-code-ultimate-guide architecture.md. Deliverable: one-page diff of how Codex and Claude Code handle tools, memory, and sandboxing.
 
@@ -478,13 +795,13 @@ Treat automated skill generation like AI-generated code: useful, often correct i
 
 **Week 4 — Long-running + safety.** Read §4 and §5. Build the initializer/coder pattern. Add one real hook and one sandbox boundary. Read *Managed Agents* for the assumptions-decay lesson.
 
-**Week 5 — Middleware.** Read §7–8 and build in LangChain/LangGraph: a summarization middleware + a token-monitor trigger + one interrupt/checkpoint before a destructive tool.
+**Week 5 — Middleware.** Read §7–8, including §8.4. Build in LangChain/LangGraph: a summarization middleware + a token-monitor trigger + one interrupt/checkpoint before a destructive tool. Add a trace field explaining why each context item was included, compressed, or dropped.
 
-**Week 6 — Guardrails, routing, observability.** Read §9–11. Add a model-routing rule, an input/output guardrail, and structured logging.
+**Week 6 — Guardrails, routing, observability.** Read §9–11, including the new §11.3–11.4. Add a model-routing rule, an input/output guardrail, structured logging, a small frozen regression set, and one failure-diagnosis template that distinguishes context, tool, policy, environment, verifier, and model failures.
 
 **Week 7 — Capstone: build a full loop.** Design and ship a closed loop end to end: pick a real repetitive task, define a measurable verifier, wire a trigger, build orchestrator + two specialist sub-agents, add a human-escalation checkpoint, assemble all five harness layers with a CI gate. Write up where the verifier was the bottleneck.
 
-**Week 8 — The autonomous future.** Read §12–16. Read the Skill-MAS paper (§12.2) and the DGM paper (§15.1) end to end. Read the Self-Evolving Agents survey (§12.1) §3.3 on tools. **Reflection deliverable:** for your Week 7 capstone loop, answer: (a) which skills could be *discovered* from trajectories rather than hand-written, (b) which tools could be *generated* rather than pre-built, (c) what evaluation criteria would you need in place to safely allow the agent to create a new tool, and (d) what sandbox boundary would prevent a runaway self-modification loop.
+**Week 8 — The autonomous future.** Read §12–16, especially §12.3 and §16.4. Read the Skill-MAS paper (§12.2), *Harness Updating Is Not Harness Benefit* (§12.3), and the DGM paper (§15.1). Read the Self-Evolving Agents survey (§12.1) §3.3 on tools. **Reflection deliverable:** for your Week 7 capstone loop, answer: (a) which skills could be *discovered* from trajectories rather than hand-written, (b) which tools could be *generated* rather than pre-built, (c) what evaluation criteria would you need in place to safely allow the agent to create a new tool, (d) what sandbox boundary would prevent a runaway self-modification loop, and (e) how would you prove the deployed agent actually benefits from a new skill rather than merely storing it?
 
 ## The shortlist (if you only read 15 things)
 1. Tosea.ai — *What Is Loop Engineering?* (the four-era lineage)
@@ -502,6 +819,22 @@ Treat automated skill generation like AI-generated code: useful, often correct i
 13. arXiv 2305.17126 — *LATM* (agents that make tools)
 14. arXiv 2305.16291 — *Voyager* (the ever-growing skill library — the design template)
 15. arXiv 2505.22954 — *Darwin Gödel Machine* (agents that rewrite their own code — the frontier)
+
+## 2026 research addendum (new references added in this update)
+Read these after the core 15-item shortlist. They sharpen the curriculum’s weakest point: how to evaluate, diagnose, and safely deploy an evolving harness.
+
+1. *Code as Agent Harness: Toward Executable, Verifiable, and Stateful Agent Systems* — unified survey of harness interfaces, mechanisms, scaling, and open challenges. https://arxiv.org/abs/2605.18747
+2. *Externalization in LLM Agents* — unified view of memory, skills, protocols, and harness engineering. https://arxiv.org/abs/2604.08224
+3. *Harnesses for Inference-Time Alignment over Execution Trajectories* — why more scaffolding can hurt; study over-decomposition and over-pruning. https://arxiv.org/abs/2605.21516
+4. *A Benchmark for Context Retrieval in Coding Agents (ContextBench)* — process-level retrieval precision, recall, and efficiency. https://arxiv.org/abs/2602.05892
+5. *Meta Context Engineering via Agentic Skill Evolution* — co-evolves context-management skills and context artifacts. https://arxiv.org/abs/2601.21557
+6. *InfiAgent* — externalized file-centric state for bounded long-horizon reasoning. https://arxiv.org/abs/2601.03204
+7. *LongSeeker* — context operations as explicit agent actions: Skip, Compress, Rollback, Snippet, Delete. https://arxiv.org/abs/2605.05191
+8. *SEAGym* — a release-like evaluation environment for self-evolving harnesses, including frozen validation, transfer, replay, cost, and snapshots. https://arxiv.org/abs/2606.17546
+9. *HarnessFix* — trace-guided diagnosis and scoped repair of harness flaws. https://arxiv.org/abs/2606.06324
+10. *Agentic Harness Engineering* — observability-driven automatic harness evolution using falsifiable edit contracts. https://arxiv.org/abs/2604.25850
+11. *Harness Updating Is Not Harness Benefit* — distinguish creating useful updates from a deployed agent actually benefiting from them. https://arxiv.org/abs/2605.30621
+12. *Autogenesis: A Self-Evolving Agent Protocol* — lifecycle, versioning, provenance, promotion, and rollback for evolving agent resources. https://arxiv.org/abs/2604.15034
 
 ## A note on currency
 Codex models move fast (GPT-5.2-Codex → GPT-5.3-Codex shipped within this window) and harness internals change weekly. Always check the live **Codex Changelog** (https://developers.openai.com/codex/changelog), the **Anthropic Engineering** hub (https://www.anthropic.com/engineering), and **docs.claude.com** for the current state before relying on any specific version detail above.
