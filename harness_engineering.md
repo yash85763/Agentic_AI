@@ -333,39 +333,175 @@ Generate realistic eval tasks, measure tool-use accuracy + token/latency/error m
 
 ---
 
+# PART IV — THE AUTONOMOUS FUTURE: SELF-GENERATING SKILLS, TOOLS & AGENTS
+
+> **The thesis you've identified.** The two papers you uploaded crystallise the direction the entire field is converging on. The Skill-MAS paper shows that a frozen frontier LLM can *evolve its own orchestration strategy* (the Meta-Skill) through a closed optimization loop — without any gradient updates, without human-written rules. The Auto-SKILL.md paper shows that skill files can be *mined from interaction trajectories* rather than hand-authored. Together they point at a world where agents don't just *use* skills and tools — they *discover, design, and write* them. The human role shifts from "write the skill" to "set the goal, approve the new capability, maintain the sandbox." This is not a distant research horizon; it is already happening in production (Devin built tools it later used on itself; DGM improved from 20% to 50% on SWE-bench by rewriting its own code). This Part maps that frontier.
+
+---
+
+## 12. The Three-Stage Evolution: Tool User → Tool Maker → Self-Improving System
+
+### 12.1 The paradigm shift: from static tool user to autonomous tool maker
+The fundamental arc of agent capability is: (1) agents that *use* pre-built tools (fixed toolsets, human-written APIs), (2) agents that *create* tools on demand when their toolset is insufficient, (3) agents that *evolve* their own architecture, prompts, workflows, and skills over time — without weight updates. The bottleneck has always been the fixed toolset. The research frontier is removing that constraint entirely.
+
+- **Survey (essential reading):** *A Survey of Self-Evolving Agents: What, When, How, and Where to Evolve on the Path to Artificial Super Intelligence* (TMLR 2026) — the comprehensive map of the entire self-evolution space across model-centric, environment-centric, and co-evolution approaches. https://arxiv.org/abs/2507.21046
+- **Survey repo:** Awesome-Self-Evolving-Agents — curated paper list maintained live. https://github.com/XMUDeepLIT/Awesome-Self-Evolving-Agents
+- **Blog (practitioner framing):** *Self-Improving AI Agents: The 2026 Guide* — o-mega.ai (Devin, DGM, Karpathy's autoresearch, the SWE-bench arc from 13% to 59%+). https://o-mega.ai/articles/self-improving-ai-agents-the-2026-guide
+
+### 12.2 What the uploaded papers prove — and why they belong here
+**Skill-MAS** (arXiv:2606.18837, HKUST/Ant Group, June 2026) solves the dilemma between inference-time MAS (high capability, no learning) and training-time MAS (learns but capped by small models). The third path: treat the Meta-agent's orchestration strategy itself as an evolvable SKILL.md. A closed loop of Multi-Trajectory Rollout + Selective Reflection refines the Meta-Skill across rounds. The evolved skills are transferable across LLMs and unseen tasks — proving that *the skill, not the weight update, is the unit of learning*.
+
+**Auto-SKILL.md** (arXiv:2606.20363, MIT/Harvard, NeurIPS 2026) asks whether skill files can be mined from GUI interaction trajectories rather than hand-authored. The honest result: trajectory mining produces readable source-domain structure (5/8 clusters ≥0.95 purity), but the current pipeline doesn't yet beat trivial frequency baselines on cross-domain transfer. This is valuable precisely because it is a *diagnostic study* — it tells you exactly which parts of automated skill generation are solved (readable structure extraction) and which remain open (reliable cross-domain transfer).
+
+Together, these papers define the two frontiers: *skill evolution from task experience* (Skill-MAS) and *skill discovery from interaction data* (Auto-SKILL.md). The curriculum implications: you need to understand both.
+
+- **Paper:** *Skill-MAS: Evolving Meta-Skill for Automatic Multi-Agent Systems* — Lin, Yang, Qin (HKUST/Ant Group), arXiv:2606.18837. https://arxiv.org/abs/2606.18837
+- **Paper:** *Automating SKILL.md Generation for Computer-Using Agents via Interaction Trajectory Mining* — Hao, Li (MIT/Harvard), arXiv:2606.20363. https://arxiv.org/abs/2606.20363
+
+---
+
+## 13. Agents That Create Their Own Tools (LATM → ToolMaker → Tool-R0)
+
+### 13.1 LATM — the foundational "tool maker" pattern
+The closed-loop framework where one LLM acts as **tool maker** (crafts reusable Python tools for a class of tasks) and a cheaper LLM acts as **tool user** (applies those tools). Tools are cached via APIs and reused across requests. This decouples the cost of creation from the cost of execution — the frontier model is only called once per tool type, not per task. Every subsequent autonomous tool-creation system builds on this two-phase pattern.
+
+- **Paper (essential):** *Large Language Models as Tool Makers (LATM)* — Cai et al., arXiv:2305.17126. The foundational paper. https://arxiv.org/abs/2305.17126
+- **Blog:** *The LATM Pattern* — LinkedIn explainer with supply-chain application walkthrough. https://www.linkedin.com/pulse/latm-llm-tool-maker-pattern-christian-bauersachs-nh9lf
+
+### 13.2 CREATOR — disentangling abstract tool design from concrete execution
+CREATOR separates the *abstract reasoning* about what a tool should do from the *concrete implementation* of it. The agent first reasons about the general structure of a reusable function, then writes the specific code. This separation prevents conflating "what capability do I need?" with "how do I implement it?" — a clean architectural boundary that improves generalization and reuse.
+
+- **Paper:** *CREATOR: Disentangling Abstract and Concrete Reasonings of Large Language Models through Tool Creation* — Qian et al., Tsinghua University, arXiv:2305.14318.
+
+### 13.3 ToolMaker — converting code repositories into agent-usable tools autonomously
+Given a GitHub URL and a short task description, ToolMaker autonomously installs dependencies, generates tool-wrapping code, and uses a closed-loop self-correction mechanism for debugging. Correctly implements 80% of tasks across 15 complex computational domains — substantially outperforming prior SWE agents. This is the step toward *fully autonomous scientific workflows*: the agent doesn't ask for a tool, it reads the paper, clones the repo, and wraps it.
+
+- **Paper:** *LLM Agents Making Agent Tools (ToolMaker)* — Wölflein et al., arXiv:2502.11705. https://arxiv.org/abs/2502.11705
+
+### 13.4 Tool-R0 — self-evolving tool-calling from zero data via self-play RL
+Trains a general-purpose tool-calling agent from scratch with self-play RL, under a *zero-data assumption*. Two LLMs co-evolve: a Generator proposes challenging tasks at the Solver's competence frontier; the Solver attempts them. No human-labeled data, no hand-crafted task-solution pairs. This is the removal of the last human bottleneck in tool learning.
+
+- **Paper:** *Tool-R0: Self-Evolving LLM Agents for Tool-Learning from Zero Data* — Acikgoz et al., arXiv:2602.21320. https://arxiv.org/abs/2602.21320
+
+---
+
+## 14. Agents That Build Their Own Skill Libraries (Voyager → MUSE-Autoskill → Skill-MAS)
+
+### 14.1 Voyager — the seminal ever-growing skill library (no gradient updates)
+The first LLM-powered lifelong learning agent to build an ever-growing library of executable code skills, entirely without parameter fine-tuning. Three components: (1) an automatic curriculum that always proposes goals at the frontier of what the agent can do, (2) a skill library indexed by natural language and retrieved by semantic similarity, (3) iterative prompting with environment feedback + self-verification for skill refinement. Result: 3.3× more unique items, 15.3× faster tech-tree unlocks vs. prior SOTA — and the learned skills transfer to novel tasks in new worlds. This is the design template for every autonomous skill-accumulating agent that followed.
+
+- **Paper (essential):** *Voyager: An Open-Ended Embodied Agent with Large Language Models* — Wang et al. (NVIDIA/Caltech), NeurIPS 2023, arXiv:2305.16291. https://arxiv.org/abs/2305.16291
+- **Project site + code:** https://voyager.minedojo.org/
+
+### 14.2 EvoSkill — co-evolutionary skill verification for multi-agent systems
+Extends Voyager's skill evolution to multi-agent settings. Skills are discovered, refined, and verified through co-evolutionary feedback — agents critique each other's skills, creating a verification loop that weeds out brittle skills before they pollute the library.
+
+- **Paper:** *EvoSkills: Self-Evolving Agent Skills via Co-Evolutionary Verification* — Alzubi et al., arXiv:2604.01687. https://arxiv.org/pdf/2604.01687
+
+### 14.3 MUSE-Autoskill — full skill lifecycle (create, memory, manage, evaluate)
+Formalizes the four-stage skill lifecycle: (1) **Creation** — generate a skill from a successful trajectory, (2) **Memory** — store with metadata and retrieval index, (3) **Management** — score, prune, merge conflicting skills, (4) **Evaluation** — run on held-out tasks to validate generalization. The paper also shows cross-agent skill transfer: skills generated by one backbone model improve a different backbone. The management stage (preventing library rot and bloat) is the engineering insight most practitioners miss.
+
+- **Paper:** *MUSE-Autoskill: Self-Evolving Agents via Skill Creation, Memory, Management, and Evaluation* — arXiv:2605.27366. https://arxiv.org/html/2605.27366v1
+
+### 14.4 AutoRefine — extracting reusable expertise from loop trajectories (cross-reference §0.5)
+Already covered in §0.5 as a loop engineering paper, but belongs here too: successful trajectory patterns become specialist subagents; static knowledge becomes skill patterns; a maintenance mechanism scores, prunes, and merges. This is the bridge from "loop engineering" to "autonomous skill library building."
+- **Paper:** *AutoRefine: From Trajectories to Reusable Expertise for Continual LLM Agent Refinement* — arXiv:2601.22758. https://arxiv.org/html/2601.22758v1
+
+---
+
+## 15. Agents That Rewrite Their Own Architecture (The Self-Modification Frontier)
+
+### 15.1 Darwin Gödel Machine (DGM) — agents that improve by rewriting their own code
+The most significant result in autonomous self-improvement to date. DGM is initialized with one coding agent and a coding benchmark. It iteratively: proposes modifications to its own Python codebase (prompts, workflows, tools), implements them, evaluates on the benchmark, adds all variants to an archive (Darwin's open-ended exploration), and selects parents for the next round. Result: SWE-bench performance improved from 20.0% to 50.0% *automatically* — the agent discovered better code-editing tools, long-context management strategies, and peer-review mechanisms *for itself*. Done with sandboxing and human oversight throughout. This is the closest thing to a self-improving system in production today.
+
+- **Paper (essential):** *Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents* — Zhang et al. (Sakana AI + UBC), arXiv:2505.22954. https://arxiv.org/abs/2505.22954
+- **Repo:** https://github.com/jennyzzt/dgm
+- **Blog:** Sakana AI announcement. https://sakana.ai/dgm/
+
+### 15.2 Self-coding information systems — agents that redeploy their own source code at runtime
+Proposes systems where agentic AI dynamically generates, tests, and *redeploys* their own source code at runtime to reduce feature delivery time. The implication: the agent doesn't just modify its prompts or skills — it modifies the running system and hot-swaps it. This is the software engineering version of self-modification.
+
+- **Reference:** *Toward self-coding information systems* — listed in the awesome-ai-agent-papers repo. https://github.com/VoltAgent/awesome-ai-agent-papers
+
+### 15.3 CORAL — multi-agent systems that self-evolve via shared persistent memory
+Long-running multi-agent systems where agents self-evolve through shared persistent memory and open-ended discovery. Multiple agents contribute to a growing shared knowledge base; the topology of the agent network itself evolves.
+
+- **Reference:** *CORAL: Towards Autonomous Multi-Agent Evolution for Open-Ended Discovery* — in awesome-ai-agent-papers. https://github.com/VoltAgent/awesome-ai-agent-papers
+
+---
+
+## 16. What This Means for the Practitioner: The New Engineering Contract
+
+### 16.1 The three-level autonomy ladder (and where humans still belong)
+The practitioner framing from Vellum's 2026 agent guide makes the stakes concrete:
+
+Level 1 — **AI Workflow**: makes output decisions based on natural language. Fully human-directed.
+Level 2 — **Router Workflow**: chooses which tasks and tools to execute. Human defines the tool inventory.
+Level 3 — **Autonomous Agent**: creates new tasks *and new tools* to execute. Human sets goals, approves new capabilities, maintains the sandbox.
+
+Most teams in 2025 were at Level 2. The research in §13–15 is what Level 3 looks like in practice. The engineering discipline shifts: you stop writing tools and start designing the *evaluation criteria* and *safety boundaries* under which the agent is allowed to create them.
+
+- **Blog:** *The 2026 Guide to AI Agent Workflows* — Vellum (three-level taxonomy, LATM, tool creation). https://www.vellum.ai/blog/agentic-workflows-emerging-architectures-and-design-patterns
+- **Blog:** *Taming AI Agents: The Autonomous Workforce of 2026* — CIO (by early 2026, agents write their own tools; containment principles). https://www.cio.com/article/4064998/taming-ai-agents-the-autonomous-workforce-of-2026.html
+
+### 16.2 The new human role: capability approver + sandbox maintainer
+When agents generate their own skills and tools, the human role is no longer "write the SKILL.md" — it is:
+1. **Set the goal and success criteria** (the verifier, as §0 established, remains human-defined).
+2. **Approve new capability requests** — when an agent determines it needs a tool that doesn't exist, it surfaces a request (the equivalent of a PR). The human reviews, approves, or rejects.
+3. **Maintain the sandbox and blast radius** — as generated tools compound, the attack surface grows. §5 (sandboxing) and §10 (guardrails) become more critical, not less, as autonomy increases.
+4. **Manage library rot** — the skill library needs the same maintenance discipline as a codebase: scoring, pruning, merging, deprecating (§14.3 MUSE-Autoskill lifecycle).
+
+- **Survey (§3.3 — tools):** *A Survey of Self-Evolving Agents* (autonomous discovery, mastery, management — the three fronts). https://arxiv.org/abs/2507.21046
+- **Cross-reference:** §5 (Environment, Sandboxing & Safety), §10 (Guardrail Middleware), §0.6 (Loop failure modes).
+
+### 16.3 The honest negative result: readability ≠ transferability (the Auto-SKILL.md lesson)
+The Auto-SKILL.md paper's diagnostic finding is the most important calibration for practitioners excited about automated skill generation: *trajectory mining can produce readable skill structure, but the current pipeline doesn't beat trivial frequency baselines on cross-domain transfer.* The mined skills are inspectable; they are not yet reliable. This means: automated skill generation is currently most valuable as a *first draft* that humans review and refine, not as a fully autonomous pipeline. The bottleneck is the reward model and the ordering-unaware segment representation — both are active research problems.
+
+Treat automated skill generation like AI-generated code: useful, often correct in structure, requires human review before production deployment.
+
+- **Paper:** Auto-SKILL.md (§12.2). The negative result section is the most important read. https://arxiv.org/abs/2606.20363
+- **Cross-reference:** §0.6 (failure modes of loops), §11.2 (eval-driven improvement).
+
+---
+
 # PART III — THE LEARNING PLAN
 
-## How to actually learn this (suggested 7-week path)
+## How to actually learn this (suggested 8-week path)
 
-**Week 0 — Loop Engineering methodology.** Read §0.1–0.4 fully. Then read the two primary blog-level resources: Tosea.ai (the lineage) and AI Builder Club (verifier-as-bottleneck checklist). Watch the two videos referenced in §0. Deliverable: for one repetitive task you do manually, write down (a) the trigger, (b) the state check, (c) the exit condition, and (d) whether it should be open or closed — *before* writing a single line of code.
+**Week 0 — Loop Engineering methodology.** Read §0.1–0.4. Read Tosea.ai and AI Builder Club. Deliverable: for one repetitive task, write down the trigger, state check, exit condition, and open/closed choice — before writing any code.
 
-**Week 1 — Mental model.** Read §1.1–1.3 end to end. Then read the two foundational primaries cover to cover: Anthropic *Building Effective Agents* and OpenAI *Unrolling the Codex agent loop*. Deliverable: write the `while(tool_call)` loop from memory in ~30 lines of pseudocode.
+**Week 1 — Mental model.** Read §1.1–1.3. Read Anthropic *Building Effective Agents* and OpenAI *Unrolling the Codex agent loop* cover to cover. Deliverable: write the `while(tool_call)` loop from memory in ~30 lines of pseudocode.
 
-**Week 2 — Read the source.** Clone `openai/codex` and skim `codex-rs/`; read the claude-code-ultimate-guide architecture.md alongside it. Deliverable: a one-page diff comparing how Codex and Claude Code handle tools, memory, and sandboxing (use the Zylos analysis as a key).
+**Week 2 — Read the source.** Clone `openai/codex`, skim `codex-rs/`, read claude-code-ultimate-guide architecture.md. Deliverable: one-page diff of how Codex and Claude Code handle tools, memory, and sandboxing.
 
-**Week 3 — Repo scaffold.** Read §2 fully. Write a real ~100-line AGENTS.md for one of your own repos using the "table-of-contents not encyclopedia" principle, backed by a `docs/` system-of-record. Read the OpenAI *Harness engineering* case study twice.
+**Week 3 — Repo scaffold.** Read §2. Write a real ~100-line AGENTS.md backed by a `docs/` system-of-record. Read *Harness engineering: leveraging Codex* twice.
 
-**Week 4 — Long-running + safety.** Read §4 and §5. Build the initializer/coder pattern from Anthropic's long-running-agents quickstart. Add one real hook and one sandbox boundary. Read *Managed Agents* for the "assumptions decay" lesson.
+**Week 4 — Long-running + safety.** Read §4 and §5. Build the initializer/coder pattern. Add one real hook and one sandbox boundary. Read *Managed Agents* for the assumptions-decay lesson.
 
-**Week 5 — Middleware.** Read §7–8 and build in LangChain/LangGraph: a summarization middleware + a token-monitor trigger + one interrupt/checkpoint before a destructive tool. Read the LangChain context-engineering docs as you go.
+**Week 5 — Middleware.** Read §7–8 and build in LangChain/LangGraph: a summarization middleware + a token-monitor trigger + one interrupt/checkpoint before a destructive tool.
 
 **Week 6 — Guardrails, routing, observability.** Read §9–11. Add a model-routing rule, an input/output guardrail, and structured logging.
 
-**Week 7 — Capstone: build a full loop.** Design and ship a closed loop end to end: pick a real repetitive task, define a measurable verifier, choose open or closed, wire a trigger (cron or webhook), build the orchestrator + at least two specialist sub-agents, add a human-escalation checkpoint, and assemble all five harness layers (Memory → Tools → Permissions → Hooks → Observability) with a CI gate. Write up where the verifier was the bottleneck and where harness assumptions had to be revised.
+**Week 7 — Capstone: build a full loop.** Design and ship a closed loop end to end: pick a real repetitive task, define a measurable verifier, wire a trigger, build orchestrator + two specialist sub-agents, add a human-escalation checkpoint, assemble all five harness layers with a CI gate. Write up where the verifier was the bottleneck.
 
-## The shortlist (if you only read 12 things)
-1. Tosea.ai — *What Is Loop Engineering?* (the four-era lineage + definition)
-2. AI Builder Club — *Loop Engineering Guide 2026* (verifier-as-bottleneck, open/closed decision rule)
-3. arXiv 2210.03629 — *ReAct* (the atomic loop: thought-action-observation)
+**Week 8 — The autonomous future.** Read §12–16. Read the Skill-MAS paper (§12.2) and the DGM paper (§15.1) end to end. Read the Self-Evolving Agents survey (§12.1) §3.3 on tools. **Reflection deliverable:** for your Week 7 capstone loop, answer: (a) which skills could be *discovered* from trajectories rather than hand-written, (b) which tools could be *generated* rather than pre-built, (c) what evaluation criteria would you need in place to safely allow the agent to create a new tool, and (d) what sandbox boundary would prevent a runaway self-modification loop.
+
+## The shortlist (if you only read 15 things)
+1. Tosea.ai — *What Is Loop Engineering?* (the four-era lineage)
+2. AI Builder Club — *Loop Engineering Guide 2026* (verifier-as-bottleneck)
+3. arXiv 2210.03629 — *ReAct* (the atomic loop)
 4. arXiv 2303.17651 — *Self-Refine* (the self-improvement loop)
-5. arXiv 2303.11366 — *Reflexion* (the memory loop: verbal RL without weight updates)
+5. arXiv 2303.11366 — *Reflexion* (the memory loop)
 6. Anthropic — *Building Effective Agents* (foundations + patterns)
 7. OpenAI — *Unrolling the Codex agent loop* (the loop, precisely)
-8. OpenAI — *Harness engineering: leveraging Codex in an agent-first world* (the repo-scaffold masterclass)
+8. OpenAI — *Harness engineering: leveraging Codex* (the repo-scaffold masterclass)
 9. Anthropic — *Effective context engineering for AI agents*
 10. Anthropic — *Effective harnesses for long-running agents*
-11. Anthropic — *Scaling Managed Agents: Decoupling the brain from the hands*
+11. Anthropic — *Scaling Managed Agents*
 12. LangChain — *Context engineering in agents* (the middleware model)
+13. arXiv 2305.17126 — *LATM* (agents that make tools)
+14. arXiv 2305.16291 — *Voyager* (the ever-growing skill library — the design template)
+15. arXiv 2505.22954 — *Darwin Gödel Machine* (agents that rewrite their own code — the frontier)
 
 ## A note on currency
 Codex models move fast (GPT-5.2-Codex → GPT-5.3-Codex shipped within this window) and harness internals change weekly. Always check the live **Codex Changelog** (https://developers.openai.com/codex/changelog), the **Anthropic Engineering** hub (https://www.anthropic.com/engineering), and **docs.claude.com** for the current state before relying on any specific version detail above.
