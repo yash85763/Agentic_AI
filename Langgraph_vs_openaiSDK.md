@@ -1,109 +1,141 @@
-Here’s a fresh, research-backed “reading + implementation” pack (late-2025 → early-2026) that maps directly onto the core pillars of Jarvis. I’m prioritizing papers that (a) are very recent, (b) are immediately actionable, and (c) cover the failure modes that kill agent products in the wild (latency, cost, security, long-horizon reliability).
+Here's the full picture for building an A2A agent, deploying it on EC2, and letting other orchestrators call it.
 
-⸻
+## 1. Build the agent (maker side)
 
-A) Long-horizon “Software Factory” that finishes (and doesn’t burn money)
+Install `python-a2a`:
 
-1) BOAD (Dec 2025) — learn the best org chart, don’t guess it
+```bash
+pip install python-a2a
+```
 
-Why it matters: it formalizes discovering a good hierarchy (orchestrator + subagents) using multi-armed bandits, and reports strong results on SWE-bench variants (incl. OOD SWE-bench-Live).
-How you use it in Jarvis: start with your PM→TL→Dev→QA→Sec flow, then learn routing: which sub-agent sequences work best for bugfix vs feature vs refactor, and when to invoke expensive steps.  ￼
+Create your agent server (`agent.py`):
 
-2) SWE-Replay (Jan 2026) — trajectory replay/branching to cut cost without losing quality
+```python
+from python_a2a import A2AServer, AgentCard, AgentSkill, skill, agent, run_server, TaskStatus, TaskState
 
-Why it matters: test-time scaling is expensive if you “resample from scratch.” SWE-Replay reuses prior trajectories and branches at meaningful intermediate states.
-How you use it: build a debug-trajectory cache keyed by repo state + failure signature + test output; when similar failures happen, Jarvis “replays” the successful exploration path instead of re-exploring.  ￼
+@agent(
+    name="Weather Agent",
+    description="Provides weather information",
+    version="1.0.0",
+    url="http://YOUR_EC2_PUBLIC_IP:5000"  # public endpoint
+)
+class WeatherAgent(A2AServer):
 
-3) SWE-Universe (Feb 2026) — millions of verifiable SWE environments + “in-loop hacking detection”
+    @skill(
+        name="Get Weather",
+        description="Get current weather for a location",
+        tags=["weather", "forecast"]
+    )
+    def get_weather(self, location):
+        # your real logic / tool / model call here
+        return f"It's sunny and 25°C in {location}."
 
-Why it matters: it’s about scaling verifiable environments from GitHub PRs, dealing with build yield, verifiers, cost, and explicitly mentions self-verification + hacking detection during environment construction.
-How you use it: (later) for Jarvis “learning”: generate a large pool of realistic, verifiable tasks and train internal policies (routing, patching, tool-usage) safely in sandboxes.  ￼
+    def handle_task(self, task):
+        # extract the user's message text
+        text = task.message.get("content", {}).get("text", "")
+        location = text.replace("weather in", "").strip() or "your area"
 
-⸻
+        result = self.get_weather(location)
 
-B) “Body” (computer-use / tool-use) that is reliable and fast
+        task.artifacts = [{
+            "parts": [{"type": "text", "text": result}]
+        }]
+        task.status = TaskStatus(state=TaskState.COMPLETED)
+        return task
 
-4) OSWorld-Human (Jun 2025) — latency is the real bottleneck, not accuracy
+if __name__ == "__main__":
+    run_server(WeatherAgent(), host="0.0.0.0", port=5000)
+```
 
-Why it matters: shows planning/reflection dominates latency, and steps get slower over time as history grows; provides human trajectories to measure “wasted steps.”
-How you use it: make efficiency a product KPI (steps-over-human, time-per-step, tool-call rate), enforce state compression, and cap reflection tokens.  ￼
+Key maker responsibilities:
+- **Agent Card** — the `@agent` decorator auto-exposes a discovery document at `/.well-known/agent.json`. This is how orchestrators discover your agent's name, skills, and URL. Make sure the `url` is your reachable public address.
+- **Skills** — declare each capability with `@skill` so it shows up in the card.
+- **`handle_task`** — the core method that receives a task, does the work, sets artifacts, and marks the task `COMPLETED` (or `FAILED`/`INPUT_REQUIRED`).
+- Bind to `0.0.0.0`, not `127.0.0.1`, so it's reachable externally.
 
-5) OSWorld-MCP (Oct 2025) — tool invocation is now benchmarked
+## 2. Deploy on EC2
 
-Why it matters: evaluates tool invocation + GUI together; finds tools help but models often under-invoke them.
-How you use it: treat “when to call tools” as a first-class policy with budgets + forced tool checks at gates (e.g., always run tests before “done”).  ￼
+Launch and connect:
+- Launch an EC2 instance (Amazon Linux or Ubuntu).
+- **Security group**: add an inbound rule allowing TCP on your port (e.g. 5000) from the orchestrator's IP or `0.0.0.0/0` if public. This is the most common thing people forget.
 
-6) Agent S2 (Apr 2025) — split generalist vs specialists for grounding + planning
+On the instance:
 
-Why it matters: proposes compositional generalist/specialist separation (better grounding + hierarchical planning).
-How you use it: implement Jarvis “Body” as three roles: (1) perception/grounding (VLM), (2) planner, (3) executor, with cached perception and minimal re-reads.  ￼
+```bash
+sudo apt update && sudo apt install -y python3-pip
+pip3 install python-a2a
+# copy agent.py over (scp) then:
+```
 
-7) OpenAI CUA (Operator baseline) — what “operator-class” looks like
+Run it persistently (don't just run in a shell that dies on logout). Use a systemd service:
 
-Why it matters: gives a concrete reference for OSWorld/WebArena/WebVoyager performance claims and constraints.
-How you use it: use it as your north-star baseline for computer-use flows, but keep Jarvis local-first + permissioned.  ￼
+```ini
+# /etc/systemd/system/a2a-agent.service
+[Unit]
+Description=A2A Weather Agent
+After=network.target
 
-⸻
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/python3 /home/ubuntu/agent.py
+Restart=always
 
-C) Graph Memory & multimodal “mind map” that stays true (with provenance + time)
+[Install]
+WantedBy=multi-user.target
+```
 
-8) Query-Driven Multimodal GraphRAG (ACL Findings 2025) — dynamic query-local graphs from multimodal evidence
+```bash
+sudo systemctl enable --now a2a-agent
+```
 
-Why it matters: directly supports your “global graph + query-local subgraph” approach, and treats multimodal inputs (screenshots/diagrams) as first-class.
-How you use it: don’t precompute everything forever; build/refresh query-local subgraphs on demand, and attach every node/edge to evidence (span/page/bbox).  ￼
+For production, front it with nginx + TLS (so the URL is `https://yourdomain`) rather than exposing raw port 5000. Verify from outside:
 
-9) Zep / Graphiti (Jan 2025) — temporal knowledge graph for agent memory
+```bash
+curl http://YOUR_EC2_PUBLIC_IP:5000/.well-known/agent.json
+```
 
-Why it matters: explicitly focuses on temporally-aware KG memory (historical relationships), evaluated on long-memory tasks.
-How you use it: your memory schema should include valid_from/valid_to, “decision versions,” and “claim conflict sets,” so Jarvis can answer “what changed since last week?” not just “what is true.”  ￼
+## 3. How another orchestrator calls it
 
-⸻
+Any A2A-compatible orchestrator just needs your agent's URL. With `python-a2a`:
 
-D) Security (this is existential for Jarvis)
+```python
+from python_a2a import A2AClient
 
-10) Securing MCP (Dec 2025) — tool descriptor attacks: poisoning, shadowing, rug pulls
+client = A2AClient("http://YOUR_EC2_PUBLIC_IP:5000")
 
-Why it matters: shows the attack surface isn’t only prompts—tool metadata can be weaponized. Proposes signing + semantic vetting + runtime guardrails.
-How you use it: treat MCP servers as untrusted: signed manifests, descriptor integrity, allow-lists, and anomaly blocking at runtime.  ￼
+# discovery — reads the agent card
+print(client.agent_card.name, client.agent_card.skills)
 
-11) AgentSentry (Feb 26, 2026) — inference-time defense against indirect prompt injection (multi-turn)
+# send a task
+response = client.ask("weather in Tokyo")
+print(response)
+```
 
-Why it matters: tackles multi-turn “silent takeover” via tool outputs / retrieved context, using temporal causal diagnostics + context purification.
-How you use it: add a “security gate” between tool-return → planner: detect takeover signals and purify context while preserving legitimate evidence.  ￼
+If the orchestrator manages multiple agents, it can register yours in a router:
 
-12) MemoryGraft (Dec 18, 2025) — persistent memory poisoning via “poisoned experience retrieval”
+```python
+from python_a2a import AgentNetwork, AIAgentRouter
 
-Why it matters: your long-term memory is a new trust boundary; attackers can implant “successful-looking” procedures that get reused later.
-How you use it: separate fact memory vs procedure memory, sign/attest trusted procedures, and run “memory quarantine” for new experiences until validated by tests + policy.  ￼
+network = AgentNetwork()
+network.add("weather", "http://YOUR_EC2_PUBLIC_IP:5000")
 
-⸻
+agent = network.get_agent("weather")
+result = agent.ask("weather in Paris")
+```
 
-E) Practical ecosystem leverage: MCP packaging & tool onboarding
+The orchestrator does **not** need your code — only the reachable URL and the agent card it serves.
 
-13) Claude Desktop Extensions (.mcpb) (Jun 26, 2025) — one-click tool server installation pattern
+## What you (the maker) own vs. what the caller owns
 
-Why it matters: shows how fast tool ecosystems grow when integration is standardized and install is trivial.
-How you use it: adopt MCP compatibility early, but keep Jarvis’s runtime least-privilege + audit-first.  ￼
+| You (maker) | Caller / orchestrator |
+|---|---|
+| Implement `handle_task` and skills | Discovers you via agent card |
+| Serve a valid agent card at `/.well-known/agent.json` | Sends tasks to your URL |
+| Deploy on EC2, keep it running | Parses your returned artifacts |
+| Open the security-group port / TLS | Handles retries, routing, chaining |
+| Publish a stable, reachable public URL | — |
 
-⸻
+Your practical checklist: correct `url` in the agent card, bind to `0.0.0.0`, open the port in the security group, run under systemd, add HTTPS for anything real, and share the public URL with whoever's orchestrating.
 
-What to implement first (based on the above evidence)
-	1.	Verification-gated “Software Factory” loop + trajectory replay
-
-	•	BOAD-inspired modular hierarchy + logging now; replay cache next.  ￼
-
-	2.	Time-aware graph memory
-
-	•	Start with temporal KG primitives (validity windows + provenance) + query-local subgraphs for speed.  ￼
-
-	3.	Security hardening before “tool ecosystem scale”
-
-	•	MCP descriptor signing/vetting + IPI defense + memory poisoning defenses.  ￼
-
-	4.	Latency as a KPI
-
-	•	OSWorld-Human-style metrics from day 1 (steps, time, tool calls, reflection budget).  ￼
-
-⸻
-
-If you want, I can turn this into a concrete “Jarvis research-to-roadmap spec”: a table of paper → feature → architecture decision → measurable KPI → MVP cut (so it’s investor-ready and engineering-ready).
+One caveat: `python-a2a`'s exact class and method names (e.g. `TaskStatus`/`TaskState`, decorator arguments) have shifted across versions. If an import fails, check your installed version's docs — the structure above holds, but names may differ slightly. Want me to tailor this to a specific agent (a real tool, a model call, LangChain/MCP integration) rather than the weather stub?
